@@ -44,6 +44,8 @@
 
     <!-- Notification permissions (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <application
       android:name=".MainApplication"
@@ -69,5 +71,11 @@
         <!-- Notifee foreground service -->
         <!-- <service android:name="app.notifee.core.ForegroundService" android:exported="false" android:foregroundServiceType="mediaProjection|camera|microphone" /> -->
       </activity>
+
+      <service
+        android:name=".callservice.CallForegroundService"
+        android:exported="false"
+        android:foregroundServiceType="microphone"
+        android:stopWithTask="false" />
     </application>
 </manifest>
