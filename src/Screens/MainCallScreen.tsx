@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   BackHandler,
   Alert,
+  AppState,
 } from 'react-native';
 import { commonFontStyle } from '../theme/fonts';
 import { colors } from '../theme/colors';
@@ -97,7 +98,7 @@ const MainCallScreen = () => {
   };
 
   useEffect(() => {
-    if (!showFullScreenCall) return; // don’t attach if false
+    if (!showFullScreenCall) return; // don't attach if false
 
     const backAction = () => {
       setShowFullScreenCall(false);
@@ -114,6 +115,43 @@ const MainCallScreen = () => {
       backHandler.remove();
     };
   }, [showFullScreenCall]);
+
+  // Check for ongoing calls when app comes to foreground
+  useEffect(() => {
+    const handleAppStateChange = (nextAppState: string) => {
+      console.log('AppState changed to:', nextAppState);
+      if (nextAppState === 'active') {
+        // Small delay to ensure call state is loaded
+        setTimeout(() => {
+          console.log('Checking call state on app resume:', callDetails?.state);
+          console.log('Full callDetails object:', JSON.stringify(callDetails, null, 2));
+          // App came to foreground - check if there's an ongoing call
+          if (callDetails && (callDetails.state === 'ongoing' || callDetails.state === 'outgoing')) {
+            console.log('App resumed with ongoing call, showing call UI');
+            setShowFullScreenCall(true);
+            
+            // Check if we need to wait for reconnection
+            if (callDetails.state === 'ongoing') {
+              console.log('Checking connection status for ongoing call...');
+              // The EndCall button will show proper error if connection is not available
+              // This is handled in the CallProvider's endCall function
+            }
+          } else {
+            console.log('No ongoing call detected, callDetails:', callDetails);
+          }
+        }, 100);
+      }
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => subscription?.remove();
+  }, [callDetails, setShowFullScreenCall]);
+
+  // Debug: Log call state changes
+  useEffect(() => {
+    console.log('Call state changed to:', callDetails?.state);
+    console.log('Show full screen call:', showFullScreenCall);
+  }, [callDetails?.state, showFullScreenCall]);
 
   if (callDetails.state === 'idle') {
     return null;

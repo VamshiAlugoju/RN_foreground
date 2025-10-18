@@ -41,6 +41,7 @@ import {
 import { useMe } from '../hooks/util/useMe';
 
 import { getAppLanguage } from '../utils/asyncStorage';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   CallDirection,
   useInCallManager,
@@ -48,6 +49,14 @@ import {
 
 import { IUser } from '../types/user.type';
 import { getSocket } from '../socket-client/socket';
+import { NativeModules } from 'react-native';
+
+const { CallService } = NativeModules as {
+  CallService?: {
+    startForegroundService: (title: string, message: string) => void;
+    stopForegroundService: () => void;
+  };
+};
 
 const CallsContext = createContext<ICallsContext | undefined>(undefined);
 
@@ -108,6 +117,132 @@ function CallProvider({ children }: { children: React.ReactNode }) {
 
   const inCallController = useInCallManager();
 
+  // Simple connection status check
+  const [isConnectionRestored, setIsConnectionRestored] = useState(false);
+
+
+  // Check for ongoing calls when app starts
+  useEffect(() => {
+    const checkForOngoingCall = async () => {
+      try {
+        const savedCall = await AsyncStorage.getItem('ongoingCall');
+        if (savedCall) {
+          const callData = JSON.parse(savedCall);
+          console.log('Found persisted call state:', callData);
+          
+          // Check if call is recent (within last 5 minutes)
+          const isRecent = Date.now() - callData.timestamp < 5 * 60 * 1000;
+          if (isRecent) {
+            console.log('Original saved state:', callData.state);
+            console.log('Forcing to ongoing state for both devices');
+            console.log('Restored participants:', callData.participants);
+            console.log('Restored recipients:', callData.recipients);
+            console.log('Restored recipentList:', callData.recipientList);
+            
+            // Create participants from recipient data if participants is empty
+            let participants = callData.participants || [];
+            console.log('Participants length:', participants.length);
+            console.log('RecipientList length:', callData.recipientList?.length);
+            console.log('Recipients length:', callData.recipients?.length);
+            
+            if (participants.length === 0) {
+              // Try recipientList first, then fallback to recipients
+              if (callData.recipientList && callData.recipientList.length > 0) {
+                console.log('Creating participants from recipientList');
+                participants = callData.recipientList.map((recipient: any) => ({
+                  userId: recipient._id,
+                  participantId: recipient._id,
+                  audioConsumer: null,
+                  videoConsumer: null,
+                  client: {
+                    id: recipient._id,
+                    name: recipient.name,
+                    username: recipient.username,
+                    image: recipient.image,
+                  },
+                  isScreenSharing: false,
+                  isVideoPaused: false,
+                  isAudioPaused: false,
+                  isAudioMutedByHost: false,
+                  isVideoMutedByHost: false,
+                  participantContact: null,
+                }));
+              } else if (callData.recipients && callData.recipients.length > 0) {
+                console.log('Creating participants from recipients (fallback)');
+                participants = callData.recipients.map((recipient: any) => ({
+                  userId: recipient.id,
+                  participantId: recipient.id,
+                  audioConsumer: null,
+                  videoConsumer: null,
+                  client: {
+                    id: recipient.id,
+                    name: recipient.name,
+                    username: recipient.username,
+                    image: recipient.profilePic || '',
+                  },
+                  isScreenSharing: false,
+                  isVideoPaused: false,
+                  isAudioPaused: false,
+                  isAudioMutedByHost: false,
+                  isVideoMutedByHost: false,
+                  participantContact: null,
+                }));
+              }
+            }
+            
+            // Force both devices to ongoing state for consistent UI
+            setCurrentCallDetails(prev => ({
+              ...prev,
+              state: 'ongoing', // Both devices show ongoing call UI
+              clientCallId: callData.clientCallId,
+              type: callData.callType,
+              roomId: callData.roomId,
+              callId: callData.callId,
+              initiatorId: callData.initiatorId,
+              startedAt: new Date(callData.timestamp),
+              // Add missing fields for proper UI display
+              recipients: callData.recipients || [],
+              recipentList: callData.recipientList || [],
+              isGroupCall: callData.recipients ? callData.recipients.length > 1 : false,
+              participants: participants,
+            }));
+            setShowFullScreenCall(true);
+            
+            // Start monitoring connection restoration
+            const checkConnection = () => {
+              if (userData && socket.connected) {
+                console.log('Connection restored! User data and socket are available');
+                setIsConnectionRestored(true);
+              } else {
+                console.log('Waiting for connection... User data:', !!userData, 'Socket connected:', socket.connected);
+                
+                // If we have user data but no socket connection, try to reconnect
+                if (userData && !socket.connected) {
+                  console.log('User data available but socket not connected, attempting reconnection...');
+                  // Socket reconnection will be implemented separately
+                  console.log('Socket reconnection needs to be implemented');
+                }
+                
+                setTimeout(checkConnection, 2000); // Check every 2 seconds
+              }
+            };
+            
+            // Start checking after a short delay
+            setTimeout(checkConnection, 1000);
+            
+          } else {
+            // Call is too old, clear it
+            await AsyncStorage.removeItem('ongoingCall');
+          }
+        }
+      } catch (e) {
+        console.log('Error checking for ongoing call:', e);
+      }
+    };
+
+    checkForOngoingCall();
+  }, []);
+
   const startCall = useCallback(
     async (params: StartCallParams) => {
       if (!userData) return;
@@ -146,6 +281,22 @@ function CallProvider({ children }: { children: React.ReactNode }) {
         clientCallId,
         type: callType,
       }));
+      
+      // Start foreground service when call begins
+      try {
+        CallService?.startForegroundService?.('Calling...', 'Tap to return');
+        // Save call state to persist across app restarts
+        await AsyncStorage.setItem('ongoingCall', JSON.stringify({
+          state: 'outgoing',
+          clientCallId,
+          callType,
+          recipients: recipients.map(r => r.id),
+          recipentList: recipentList,
+          timestamp: Date.now()
+        }));
+      } catch (e) {
+        console.log('Failed to start foreground service:', e);
+      }
       const payload = {
         callerId: userData.id,
         recipients: recipients.map(r => r.id),
@@ -212,10 +363,37 @@ function CallProvider({ children }: { children: React.ReactNode }) {
   /**
    * Ends the call
    */
-  async function endCall(context?: 'outgoing' | 'ongoing') {
+  async function endCall(context?: 'outgoing' | 'ongoing', retryCount: number = 0) {
     try {
+      console.log('endCall called with context:', context, 'retryCount:', retryCount);
       const callDetails = getCallDetails();
-      if (!callDetails || !userData) {
+      console.log('Call details in endCall:', callDetails);
+      console.log('User data in endCall:', userData);
+      console.log('Socket in endCall:', socket);
+      
+      if (!callDetails) {
+        console.log('endCall: Missing callDetails, returning early');
+        return;
+      }
+      
+      if (!userData && retryCount < 3) {
+        console.log('endCall: User data not loaded yet, waiting... (retry', retryCount + 1, '/3)');
+        // Wait a bit for user data to load, then retry
+        setTimeout(() => {
+          console.log('endCall: Retrying after user data load');
+          endCall(context, retryCount + 1);
+        }, 1000);
+        return;
+      }
+      
+      if (!userData && retryCount >= 3) {
+        console.log('endCall: User data still not loaded after 3 retries, cannot end call');
+        console.log('EndCall button disabled - no server connection available');
+        if (isConnectionRestored) {
+          ToastAndroid.show('Connection restored! EndCall button should work now.', ToastAndroid.SHORT);
+        } else {
+          ToastAndroid.show('Cannot end call - no connection to server. Please wait for connection to restore.', ToastAndroid.LONG);
+        }
         return;
       }
       // setShowFullScreenCall(false);
@@ -223,13 +401,19 @@ function CallProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      console.log('Socket connected:', socket.connected);
+      console.log('Initiator ID:', callDetails.initiatorId);
+      console.log('User ID:', userData.id);
+      
       if (callDetails.initiatorId === userData.id) {
+        console.log('Emitting END_CALL event');
         socket.emit(callSocketEvents.END_CALL, {
           callId: callDetails.callId,
           clientId: userData.id,
           roomId: callDetails.roomId,
         });
       } else if (callDetails.roomId && callDetails.roomId) {
+        console.log('Emitting LEAVE_CALL event');
         socket.emit(callSocketEvents.LEAVE_CALL, {
           callId: callDetails.callId,
           clientId: userData.id,
@@ -255,6 +439,15 @@ function CallProvider({ children }: { children: React.ReactNode }) {
       mediaProducers.stopProducing();
       closeNotifications();
       resetKeepCallAliveTimer();
+      
+      // Stop foreground service when call ends
+      try {
+        CallService?.stopForegroundService?.();
+        // Clear persisted call state
+        await AsyncStorage.removeItem('ongoingCall');
+      } catch (e) {
+        console.log('Failed to stop foreground service:', e);
+      }
       // goBackFromMainCallScreen(setShowFullScreenCall);
     } catch (err) {
       console.error(err);
@@ -299,6 +492,13 @@ function CallProvider({ children }: { children: React.ReactNode }) {
             startedAt: new Date(),
           };
         });
+        
+        // Ensure service is running when call becomes active
+        try {
+          CallService?.startForegroundService?.('Ongoing call', 'Tap to return');
+        } catch (e) {
+          console.log('Failed to start foreground service on answer:', e);
+        }
         const device = await mediaDevice.initializeDevice(
           roomId,
           rtpCapabilites,
@@ -332,6 +532,24 @@ function CallProvider({ children }: { children: React.ReactNode }) {
         mediaConsumers.setRemoteVideoData(prev => {
           return [...prev, ...newPartcipants];
         });
+
+        // Update persisted call state after participants are created
+        try {
+          const callDetailsForPersistence = getCallDetails();
+          await AsyncStorage.setItem('ongoingCall', JSON.stringify({
+            state: 'ongoing',
+            roomId,
+            callId,
+            callType,
+            initiatorId: data.initiatorId,
+            recipients: callDetailsForPersistence?.recipients || [],
+            recipentList: callDetailsForPersistence?.recipentList || [],
+            participants: newPartcipants,
+            timestamp: Date.now()
+          }));
+        } catch (e) {
+          console.log('Failed to save call state:', e);
+        }
 
         if (producers && producers.length > 0) {
           producers.forEach(async (producer: any) => {
@@ -436,6 +654,25 @@ function CallProvider({ children }: { children: React.ReactNode }) {
           startedAt: new Date(),
         };
       });
+      
+      // Save call state when call is answered (caller side)
+      try {
+        const callDetailsForPersistence = getCallDetails();
+        await AsyncStorage.setItem('ongoingCall', JSON.stringify({
+          state: 'ongoing',
+          roomId: callDetailsForPersistence?.roomId,
+          callId: callDetailsForPersistence?.callId,
+          callType: callDetailsForPersistence?.type,
+          initiatorId: callDetailsForPersistence?.initiatorId,
+          recipients: callDetailsForPersistence?.recipients || [],
+          recipentList: callDetailsForPersistence?.recipentList || [],
+          participants: callDetailsForPersistence?.participants || [],
+          timestamp: Date.now()
+        }));
+      } catch (e) {
+        console.log('Failed to save call state on answer:', e);
+      }
+      
       resetAutoEndTimer();
     } catch (err) {
       throw new Error(JSON.stringify(err));
@@ -449,8 +686,11 @@ function CallProvider({ children }: { children: React.ReactNode }) {
   }) {
     const { message = '' } = data;
     const callDetails = callDetailsRef.current;
+    
+    // If call is already ended locally, just return silently
     if (!callDetails || callDetails.state == 'idle') {
-      throw new Error('tried to end the call without the currentCal');
+      console.log('Call already ended locally, ignoring termination event');
+      return;
     }
     if (callDetails.roomId !== data.roomId) {
       // ToastAndroid.show(`call with roomId ${data.roomId} terminated`, ToastAndroid.SHORT);
