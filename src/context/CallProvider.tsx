@@ -4,6 +4,7 @@ import React, {
   useContext,
   useEffect,
   useState,
+  useRef,
 } from 'react';
 import { useMediasoup } from './RtcProvider';
 import {
@@ -37,8 +38,10 @@ import { generateUUID } from '../utils/commonFunction';
 import {
   requestCameraPermission,
   requestMicrophonePermission,
+  requestNotificationPermission,
 } from '../utils/usePermission';
 import { useMe } from '../hooks/util/useMe';
+import { Client } from '../lib/Client';
 
 import { getAppLanguage } from '../utils/asyncStorage';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -61,11 +64,11 @@ const { CallService } = NativeModules as {
 const CallsContext = createContext<ICallsContext | undefined>(undefined);
 
 function CallProvider({ children }: { children: React.ReactNode }) {
-  const { user: userData } = useMe();
+  const { user: userData, setUser } = useMe();
 
   const [showFullScreenCall, setShowFullScreenCall] = useState(true);
 
-  const { socket } = useSocket();
+  const { socket, connectSocket, status } = useSocket();
   const {
     currentCallDetails,
     callDetailsRef,
@@ -119,10 +122,59 @@ function CallProvider({ children }: { children: React.ReactNode }) {
 
   // Simple connection status check
   const [isConnectionRestored, setIsConnectionRestored] = useState(false);
+  const reconnectingRef = useRef(false);
+  const latestUserRef = useRef<IUser | null>(null);
+  const latestSocketRef = useRef<Socket | null>(null);
+  const connectionCheckTimerRef = useRef<any>(null);
+  const isConnectionRestoredRef = useRef(false);
+
+  useEffect(() => {
+    latestUserRef.current = userData || null;
+  }, [userData]);
+
+  useEffect(() => {
+    latestSocketRef.current = socket;
+  }, [socket]);
+
+  useEffect(() => {
+    isConnectionRestoredRef.current = isConnectionRestored;
+    if (isConnectionRestored && connectionCheckTimerRef.current) {
+      clearTimeout(connectionCheckTimerRef.current);
+      connectionCheckTimerRef.current = null;
+    }
+  }, [isConnectionRestored]);
+
+  // If a call is active and user is known, ensure socket reconnects after app recreation
+  useEffect(() => {
+    const state = callDetailsRef.current?.state || currentCallDetails?.state;
+    if (
+      (state === 'ongoing' || state === 'outgoing') &&
+      userData &&
+      !socket.connected &&
+      !reconnectingRef.current
+    ) {
+      reconnectingRef.current = true;
+      console.log('Reconnecting socket due to active call and available user...');
+      connectSocket(userData)
+        .then(() => {
+          console.log('Socket reconnected (active call context)');
+          setIsConnectionRestored(true);
+        })
+        .catch(err => {
+          console.log('Socket reconnection failed (active call context):', err);
+        })
+        .finally(() => {
+          reconnectingRef.current = false;
+        });
+    }
+  }, [userData, socket.connected, currentCallDetails?.state]);
 
 
   // Check for ongoing calls when app starts
   useEffect(() => {
+    // Proactively request notifications on Android 13+
+    requestNotificationPermission();
+
     const checkForOngoingCall = async () => {
       try {
         const savedCall = await AsyncStorage.getItem('ongoingCall');
@@ -208,27 +260,72 @@ function CallProvider({ children }: { children: React.ReactNode }) {
             }));
             setShowFullScreenCall(true);
             
-            // Start monitoring connection restoration
+            // Ensure foreground service is running after restoring call
+            try {
+              CallService?.startForegroundService?.('Ongoing call', 'Tap to return');
+            } catch (e) {
+              console.log('Failed to start foreground service on restore:', e);
+            }
+            
+            // Attempt immediate socket reconnection if needed
+            try {
+              if (userData && !socket.connected) {
+                console.log('Immediate socket reconnect after call restore...');
+                await connectSocket(userData);
+                setIsConnectionRestored(true);
+              } else if (!userData && !socket.connected) {
+                // If user data isn't yet in context, try to load from storage and reconnect
+                console.log('Loading stored user for reconnection...');
+                const storedUser = await Client.User.get();
+                if (storedUser) {
+                  try {
+                    await setUser(storedUser);
+                  } catch {}
+                  await connectSocket(storedUser);
+                  setIsConnectionRestored(true);
+                } else {
+                  console.log('No stored user found; socket reconnection will be deferred.');
+                }
+              }
+            } catch (e) {
+              console.log('Immediate socket reconnect failed:', e);
+            }
+            
+            // Start monitoring connection restoration and reconnect socket if needed
             const checkConnection = () => {
-              if (userData && socket.connected) {
+              const hasUser = !!latestUserRef.current;
+              const isConnected = !!latestSocketRef.current?.connected;
+              if (hasUser && isConnected) {
                 console.log('Connection restored! User data and socket are available');
                 setIsConnectionRestored(true);
               } else {
-                console.log('Waiting for connection... User data:', !!userData, 'Socket connected:', socket.connected);
+                console.log('Waiting for connection... User data:', hasUser, 'Socket connected:', isConnected);
                 
-                // If we have user data but no socket connection, try to reconnect
-                if (userData && !socket.connected) {
-                  console.log('User data available but socket not connected, attempting reconnection...');
-                  // Socket reconnection will be implemented separately
-                  console.log('Socket reconnection needs to be implemented');
+                // If we have user data but no socket connection, try to reconnect once per cycle
+                if (hasUser && !isConnected && !reconnectingRef.current) {
+                  reconnectingRef.current = true;
+                  console.log('Attempting socket reconnection...');
+                  connectSocket(latestUserRef.current as IUser)
+                    .then(() => {
+                      console.log('Socket reconnected successfully');
+                      setIsConnectionRestored(true);
+                    })
+                    .catch(err => {
+                      console.log('Socket reconnection failed:', err);
+                    })
+                    .finally(() => {
+                      reconnectingRef.current = false;
+                    });
                 }
                 
-                setTimeout(checkConnection, 2000); // Check every 2 seconds
+                if (!isConnectionRestoredRef.current) {
+                  connectionCheckTimerRef.current = setTimeout(checkConnection, 2000); // Check every 2 seconds
+                }
               }
             };
             
             // Start checking after a short delay
-            setTimeout(checkConnection, 1000);
+            connectionCheckTimerRef.current = setTimeout(checkConnection, 1000);
             
           } else {
             // Call is too old, clear it
@@ -399,6 +496,20 @@ function CallProvider({ children }: { children: React.ReactNode }) {
       // setShowFullScreenCall(false);
       if (callDetails.state === 'idle') {
         return;
+      }
+
+      // Ensure socket is connected before emitting termination events
+      if (!socket.connected && userData && !reconnectingRef.current) {
+        try {
+          reconnectingRef.current = true;
+          console.log('endCall: Socket not connected, attempting quick reconnect...');
+          await connectSocket(userData);
+          console.log('endCall: Reconnect success');
+        } catch (e) {
+          console.log('endCall: Reconnect failed, proceeding with local cleanup:', e);
+        } finally {
+          reconnectingRef.current = false;
+        }
       }
 
       console.log('Socket connected:', socket.connected);
@@ -608,6 +719,13 @@ function CallProvider({ children }: { children: React.ReactNode }) {
           ToastAndroid.SHORT,
         );
         await mediaProducers.stopProducing();
+        // Stop foreground service and clear persisted state on single-recipient rejection
+        try {
+          CallService?.stopForegroundService?.();
+          await AsyncStorage.removeItem('ongoingCall');
+        } catch (e) {
+          console.log('Failed to stop foreground service on rejection:', e);
+        }
         return;
       }
       ToastAndroid.show(
@@ -654,6 +772,13 @@ function CallProvider({ children }: { children: React.ReactNode }) {
           startedAt: new Date(),
         };
       });
+      
+      // Ensure caller's notification reflects ongoing state
+      try {
+        CallService?.startForegroundService?.('Ongoing call', 'Tap to return');
+      } catch (e) {
+        console.log('Failed to update foreground notification on answer:', e);
+      }
       
       // Save call state when call is answered (caller side)
       try {
@@ -709,6 +834,14 @@ function CallProvider({ children }: { children: React.ReactNode }) {
     hideCallNotification('showReconnectCallPopup');
     resetKeepCallAliveTimer();
     goBackFromMainCallScreen(setShowFullScreenCall);
+    
+    // Stop service and clear persisted state on remote termination
+    try {
+      CallService?.stopForegroundService?.();
+      await AsyncStorage.removeItem('ongoingCall');
+    } catch (e) {
+      console.log('Failed to stop foreground service on remote terminate:', e);
+    }
   }
   async function handleUserLeftCall(data: {
     callId: string;
