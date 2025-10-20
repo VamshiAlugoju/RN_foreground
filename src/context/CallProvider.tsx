@@ -32,7 +32,7 @@ import { Socket } from 'socket.io-client';
 import useSocket from '../socket-client/useSocket';
 import useCallState from '../hooks/calls/useCallState';
 import { callSocketEvents } from '../socket-client/socketEvents';
-import { Alert, PermissionsAndroid, ToastAndroid } from 'react-native';
+import { Alert, PermissionsAndroid, ToastAndroid, Platform } from 'react-native';
 
 import { generateUUID } from '../utils/commonFunction';
 import {
@@ -172,8 +172,16 @@ function CallProvider({ children }: { children: React.ReactNode }) {
 
   // Check for ongoing calls when app starts
   useEffect(() => {
-    // Proactively request notifications on Android 13+
-    requestNotificationPermission();
+    // Proactively request essential permissions on Android
+    const requestEssentialPermissions = async () => {
+      // Request notification permission on Android 13+
+      await requestNotificationPermission();
+      
+      // Request microphone permission (essential for calling app)
+      await requestMicrophonePermission();
+    };
+    
+    requestEssentialPermissions();
 
     const checkForOngoingCall = async () => {
       try {
@@ -724,6 +732,11 @@ function CallProvider({ children }: { children: React.ReactNode }) {
 
     resetCallDetails();
     goBackFromMainCallScreen(setShowFullScreenCall);
+    try {
+      CallService?.stopForegroundService?.();
+    } catch (e) {
+      console.log('Failed to stop foreground service on reject:', e);
+    }
   }
 
   async function onCallRejected(data: { userId: string }) {
@@ -957,6 +970,11 @@ function CallProvider({ children }: { children: React.ReactNode }) {
     });
     resetCallDetails();
     goBackFromMainCallScreen(setShowFullScreenCall);
+    try {
+      CallService?.stopForegroundService?.();
+    } catch (e) {
+      console.log('Failed to stop foreground service on ignore:', e);
+    }
   }
 
   function onIncomingCall(data: incomingCallData) {
@@ -995,6 +1013,15 @@ function CallProvider({ children }: { children: React.ReactNode }) {
     });
 
     startIncomingCallTimer(ignoreCall);
+    // Show incoming call notification before user answers
+    try {
+      const title = data?.initiatorDetails?.name
+        ? `Incoming call from ${data.initiatorDetails.name}`
+        : 'Incoming call';
+      CallService?.startForegroundService?.(title, 'Tap to answer');
+    } catch (e) {
+      console.log('Failed to start incoming call foreground notification:', e);
+    }
   }
 
   //🔊 Media/AV Controls:
@@ -1142,20 +1169,27 @@ export async function getCallPermissions(props: {
   callType: 'audio' | 'video';
 }) {
   try {
-    const micPermission = await requestMicrophonePermission();
-    if (micPermission !== 'granted') {
-      ToastAndroid.show('Microphone permission denied', ToastAndroid.SHORT);
-      return false;
-    }
-    if (props.callType === 'video') {
-      let resp = await requestCameraPermission();
-      if (resp !== 'granted') {
-        ToastAndroid.show('Camera permission denied', ToastAndroid.SHORT);
+    // Check if microphone permission is already granted (don't request again)
+    if (Platform.OS === 'android') {
+      const micPermission = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
+      if (!micPermission) {
+        ToastAndroid.show('Microphone permission is required for calls', ToastAndroid.SHORT);
         return false;
+      }
+    }
+    
+    if (props.callType === 'video') {
+      if (Platform.OS === 'android') {
+        const cameraPermission = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.CAMERA);
+        if (!cameraPermission) {
+          ToastAndroid.show('Camera permission is required for video calls', ToastAndroid.SHORT);
+          return false;
+        }
       }
     }
     return true;
   } catch (err) {
+    console.error('Error checking permissions:', err);
     return false;
   }
 }

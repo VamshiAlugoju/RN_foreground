@@ -1,4 +1,4 @@
-import { Alert, PermissionsAndroid, Platform } from 'react-native';
+import { Alert, PermissionsAndroid, Platform, ToastAndroid } from 'react-native';
 
 export const requestStoragePermission = async (): Promise<boolean> => {
   if (Platform.OS === 'android') {
@@ -75,26 +75,46 @@ export const requestCameraPermission = async () => {
   }
 };
 
-export const requestMicrophonePermission = async () => {
+export const requestMicrophonePermission = async (): Promise<boolean> => {
   if (Platform.OS === 'android') {
-    const granted = await PermissionsAndroid.request(
-      PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-      {
-        title: 'Microphone Permission',
-        message: 'We need access to your microphone to make calls',
-        buttonPositive: 'OK',
-        buttonNegative: 'Cancel',
-      },
-    );
-    if (granted === PermissionsAndroid.RESULTS.GRANTED) {
-    } else {
-      console.log('Microphone permission denied');
+    try {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+        {
+          title: 'Microphone Permission',
+          message: 'This app needs microphone access to make and receive calls. The app will not work properly without this permission.',
+          buttonPositive: 'Allow',
+          buttonNegative: 'Deny',
+        },
+      );
+      
+      if (granted === PermissionsAndroid.RESULTS.GRANTED) {
+        console.log('Microphone permission granted');
+        return true;
+      } else {
+        console.log('Microphone permission denied');
+        ToastAndroid.show(
+          'Microphone permission is required for calls. The app will not work without it.',
+          ToastAndroid.LONG
+        );
+        return false;
+      }
+    } catch (err: any) {
+      console.warn('Microphone permission error:', err);
+      ToastAndroid.show(
+        'Failed to request microphone permission. The app will not work properly.',
+        ToastAndroid.LONG
+      );
+      return false;
     }
-    return granted;
   }
 
   if (Platform.OS === 'ios') {
+    // iOS implementation would go here
+    return true;
   }
+  
+  return true;
 };
 
 // Android 13+ runtime notification permission
