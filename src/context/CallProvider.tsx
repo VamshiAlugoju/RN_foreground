@@ -514,20 +514,21 @@ function CallProvider({ children }: { children: React.ReactNode }) {
 
       console.log('Socket connected:', socket.connected);
       console.log('Initiator ID:', callDetails.initiatorId);
-      console.log('User ID:', userData.id);
+      const currentUser = userData as IUser;
+      console.log('User ID:', currentUser.id);
       
-      if (callDetails.initiatorId === userData.id) {
-        console.log('Emitting END_CALL event');
-        socket.emit(callSocketEvents.END_CALL, {
+      if (callDetails.initiatorId === currentUser.id) {
+        console.log('Emitting TERMINATE_CALL event (owner ending call)');
+        socket.emit(callSocketEvents.TERMINATE_CALL, {
           callId: callDetails.callId,
-          clientId: userData.id,
+          clientId: currentUser.id,
           roomId: callDetails.roomId,
         });
       } else if (callDetails.roomId && callDetails.roomId) {
-        console.log('Emitting LEAVE_CALL event');
+        console.log('Emitting LEAVE_CALL event (participant leaving)');
         socket.emit(callSocketEvents.LEAVE_CALL, {
           callId: callDetails.callId,
-          clientId: userData.id,
+          clientId: currentUser.id,
           roomId: callDetails.roomId,
         });
       }
@@ -775,7 +776,7 @@ function CallProvider({ children }: { children: React.ReactNode }) {
       
       // Ensure caller's notification reflects ongoing state
       try {
-        CallService?.startForegroundService?.('Ongoing call', 'Tap to return');
+          CallService?.startForegroundService?.('Ongoing call', 'Tap to return');
       } catch (e) {
         console.log('Failed to update foreground notification on answer:', e);
       }
