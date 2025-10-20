@@ -517,49 +517,81 @@ function CallProvider({ children }: { children: React.ReactNode }) {
       const currentUser = userData as IUser;
       console.log('User ID:', currentUser.id);
       
+      // Log who is ending the call
+      const isInitiator = callDetails.initiatorId === currentUser.id;
+      console.log(`[CALLER] endCall triggered by ${isInitiator ? 'CALLER (initiator)' : 'RECEIVER (participant)'}`);
+      console.log(`[CALLER] Call details:`, {
+        callId: callDetails.callId,
+        roomId: callDetails.roomId,
+        initiatorId: callDetails.initiatorId,
+        currentUserId: currentUser.id,
+        state: callDetails.state,
+      });
+      
       if (callDetails.initiatorId === currentUser.id) {
-        console.log('Emitting TERMINATE_CALL event (owner ending call)');
-        socket.emit(callSocketEvents.TERMINATE_CALL, {
+        console.log('[CALLER] User is call initiator, emitting END_CALL event (original working version)');
+        socket.emit(callSocketEvents.END_CALL, {
           callId: callDetails.callId,
           clientId: currentUser.id,
           roomId: callDetails.roomId,
         });
+        console.log('[CALLER] END_CALL emitted immediately (original working behavior)');
+        
       } else if (callDetails.roomId && callDetails.roomId) {
-        console.log('Emitting LEAVE_CALL event (participant leaving)');
+        console.log('[RECEIVER] User is participant, emitting LEAVE_CALL event');
         socket.emit(callSocketEvents.LEAVE_CALL, {
           callId: callDetails.callId,
           clientId: currentUser.id,
           roomId: callDetails.roomId,
         });
+        console.log('[RECEIVER] LEAVE_CALL emitted immediately (no delay - original behavior)');
       }
 
       if (context === 'outgoing') {
+        console.log('[CALLER/RECEIVER] Context is "outgoing", emitting END_OUTGOING_CALL');
         socket.emit(
           callSocketEvents.END_OUTGOING_CALL,
           {
             clientCallId: callDetails.clientCallId,
           },
           (resp: any) => {
-            console.log('end outgoing call response', resp);
+            console.log('[CALLER/RECEIVER] END_OUTGOING_CALL response:', resp);
           },
         );
       }
 
+      // ✅ Now safe to cleanup - socket events have been transmitted
+      console.log('[CALLER/RECEIVER] Starting local cleanup...');
+      console.log('[CALLER/RECEIVER] Step 1: Resetting call details');
       resetCallDetails();
+
+      console.log('[CALLER/RECEIVER] Step 2: Removing media device');
       removeDevice();
+
+      console.log('[CALLER/RECEIVER] Step 3: Resetting auto-end timer');
       resetAutoEndTimer();
+
+      console.log('[CALLER/RECEIVER] Step 4: Stopping media producers');
       mediaProducers.stopProducing();
+
+      console.log('[CALLER/RECEIVER] Step 5: Closing notifications');
       closeNotifications();
+
+      console.log('[CALLER/RECEIVER] Step 6: Resetting keep-alive timer');
       resetKeepCallAliveTimer();
-      
+
       // Stop foreground service when call ends
+      console.log('[CALLER/RECEIVER] Step 7: Stopping foreground service');
       try {
         CallService?.stopForegroundService?.();
-        // Clear persisted call state
+        console.log('[CALLER/RECEIVER] ✅ Foreground service stopped');
         await AsyncStorage.removeItem('ongoingCall');
+        console.log('[CALLER/RECEIVER] ✅ AsyncStorage cleared');
       } catch (e) {
-        console.log('Failed to stop foreground service:', e);
+        console.log('[CALLER/RECEIVER] ❌ Failed to stop foreground service:', e);
       }
+
+      console.log('[CALLER/RECEIVER] ✅ Call termination complete on caller/receiver side');
       // goBackFromMainCallScreen(setShowFullScreenCall);
     } catch (err) {
       console.error(err);
@@ -815,34 +847,57 @@ function CallProvider({ children }: { children: React.ReactNode }) {
     
     // If call is already ended locally, just return silently
     if (!callDetails || callDetails.state == 'idle') {
-      console.log('Call already ended locally, ignoring termination event');
+      console.log('[RECEIVER] Call already ended locally, ignoring termination event');
       return;
     }
     if (callDetails.roomId !== data.roomId) {
+      console.log('[RECEIVER] Room ID mismatch, ignoring termination event:', {
+        receivedRoomId: data.roomId,
+        currentRoomId: callDetails.roomId,
+      });
       // ToastAndroid.show(`call with roomId ${data.roomId} terminated`, ToastAndroid.SHORT);
       return;
     }
+    
+    console.log('[RECEIVER] ✅ Call termination event matches current call, proceeding with cleanup');
     // toast(`Call Terminated by ${data.callId}`);
     if (message) {
+      console.log('[RECEIVER] Displaying termination message:', message);
       ToastAndroid.show(message, ToastAndroid.SHORT);
     }
 
+    console.log('[RECEIVER] Starting cleanup after receiving termination event...');
+    
+    console.log('[RECEIVER] Step 1: Resetting call details');
     resetCallDetails();
+    
+    console.log('[RECEIVER] Step 2: Stopping media producers');
     mediaProducers.stopProducing();
 
+    console.log('[RECEIVER] Step 3: Removing media device');
     removeDevice();
 
+    console.log('[RECEIVER] Step 4: Hiding call notifications');
     hideCallNotification('showReconnectCallPopup');
+    
+    console.log('[RECEIVER] Step 5: Resetting keep-alive timer');
     resetKeepCallAliveTimer();
+    
+    console.log('[RECEIVER] Step 6: Going back from main call screen');
     goBackFromMainCallScreen(setShowFullScreenCall);
     
     // Stop service and clear persisted state on remote termination
+    console.log('[RECEIVER] Step 7: Stopping foreground service');
     try {
       CallService?.stopForegroundService?.();
+      console.log('[RECEIVER] ✅ Foreground service stopped');
       await AsyncStorage.removeItem('ongoingCall');
+      console.log('[RECEIVER] ✅ AsyncStorage cleared');
     } catch (e) {
-      console.log('Failed to stop foreground service on remote terminate:', e);
+      console.log('[RECEIVER] ❌ Failed to stop foreground service on remote terminate:', e);
     }
+    
+    console.log('[RECEIVER] ✅ Call termination complete on receiver side');
   }
   async function handleUserLeftCall(data: {
     callId: string;
