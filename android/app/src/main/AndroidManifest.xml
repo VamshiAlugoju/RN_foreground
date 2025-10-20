@@ -76,6 +76,7 @@
         android:name=".callservice.CallForegroundService"
         android:exported="false"
         android:foregroundServiceType="microphone"
-        android:stopWithTask="false" />
+        android:stopWithTask="false"
+        android:process=":callservice" />
     </application>
 </manifest>
