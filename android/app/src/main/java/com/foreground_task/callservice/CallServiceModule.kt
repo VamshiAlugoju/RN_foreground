@@ -20,11 +20,6 @@ class CallServiceModule(private val reactContext: ReactApplicationContext) :
             putExtra(CallForegroundService.EXTRA_TITLE, title)
             putExtra(CallForegroundService.EXTRA_MESSAGE, message)
         }
-        // Avoid duplicate starts in quick succession by stopping first if already running
-        try {
-            ctx.stopService(Intent(ctx, CallForegroundService::class.java))
-        } catch (_: Throwable) {
-        }
         ContextCompat.startForegroundService(ctx, i)
         Log.d("CallForegroundService", "Service started")
     }
