@@ -39,7 +39,7 @@ import {
   requestCameraPermission,
   requestMicrophonePermission,
   requestNotificationPermission,
-} from '../utils/usePermission';
+} from '../utils/permissions';
 import { useMe } from '../hooks/util/useMe';
 import { Client } from '../lib/Client';
 
