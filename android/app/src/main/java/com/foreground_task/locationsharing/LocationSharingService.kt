@@ -125,13 +125,14 @@ class LocationSharingService : Service() {
       val channel = NotificationChannel(
         CHANNEL_ID,
         CHANNEL_NAME,
-        NotificationManager.IMPORTANCE_HIGH // High importance for call-style notifications
+        NotificationManager.IMPORTANCE_LOW // Low importance to prevent pop-ups
       ).apply {
         description = CHANNEL_DESC
         setSound(null, null)
         enableVibration(false)
         lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-        setBypassDnd(true) // Bypass Do Not Disturb like calls
+        setBypassDnd(false) // Don't bypass DND to prevent pop-ups
+        setShowBadge(false) // Don't show badge
       }
       val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
       nm.createNotificationChannel(channel)
@@ -171,8 +172,8 @@ class LocationSharingService : Service() {
       .setOngoing(true)
       .setOnlyAlertOnce(true)
       .setContentIntent(contentIntent)
-      .setPriority(NotificationCompat.PRIORITY_HIGH)
-      .setCategory(Notification.CATEGORY_CALL) // Use CALL category like phone calls
+      .setPriority(NotificationCompat.PRIORITY_LOW) // Low priority to prevent pop-ups
+      .setCategory(Notification.CATEGORY_SERVICE) // Use SERVICE category for foreground services
       .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
       .setShowWhen(false)
       .setUsesChronometer(false)
@@ -186,6 +187,10 @@ class LocationSharingService : Service() {
       builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
     }
 
+    // Additional settings to prevent pop-ups and ensure non-dismissable
+    builder.setLocalOnly(true) // Don't show on external devices
+    builder.setSilent(true) // Silent notification
+    
     // Android 15+ non-dismissable notification
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
       builder.setOngoing(true)
