@@ -177,7 +177,7 @@ class LocationSharingService : Service() {
       .setShowWhen(false)
       .setUsesChronometer(false)
       .addAction(
-        R.drawable.ic_stop,
+        0, // No icon
         "Stop sharing location",
         stopPendingIntent
       )
