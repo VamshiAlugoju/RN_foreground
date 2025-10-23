@@ -22,7 +22,7 @@ interface UseCallNotifications {
   showCallNotification: (type: keyof callsNotificationType) => void;
   hideCallNotification: (type: keyof callsNotificationType) => void;
   timerRefs: RefObject<{
-    showSwitchToVideoTimer: NodeJS.Timeout | null;
+    showSwitchToVideoTimer: ReturnType<typeof setTimeout> | null;
   }>;
 
   startKeepCallAliveTimer: (callback: () => void, delay?: number) => void;
@@ -39,10 +39,10 @@ function useCallNotifications(): UseCallNotifications {
     showReconnectCallPopup: false,
   });
 
-  const timerRefs = useRef<{ showSwitchToVideoTimer: NodeJS.Timeout | null }>({
+  const timerRefs = useRef<{ showSwitchToVideoTimer: ReturnType<typeof setTimeout> | null }>({
     showSwitchToVideoTimer: null,
   });
-  const autoEndTimer = useRef<NodeJS.Timeout | null>(null);
+  const autoEndTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const incomingCallTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const switchToVideoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const keepCallAliveTimer = useRef<ReturnType<typeof setInterval> | null>(null);
