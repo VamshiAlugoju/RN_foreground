@@ -7,6 +7,8 @@ import React, {
 } from 'react';
 import useSocket from '../socket-client/useSocket';
 import { ToastAndroid } from 'react-native';
+import { locationForegroundService as foregroundService } from '../services/foreground/ForegroundService';
+import { useMe } from '../hooks/util/useMe';
 
 type Location = {
   latitude: number;
@@ -35,6 +37,9 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
   const { socket } = useSocket();
+  const { user } = useMe();
+
+  
 
   const [remoteLocation, setRemoteLocation] = useState<locationPayload | null>(
     null,
@@ -53,24 +58,11 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({
     recipentRef.current = recipentInfo;
   }, [recipentInfo]);
 
-  const onLocationUpdate = (location: Location) => {
-    if (!socket || socket.connected === false) return;
+  // Location sharing is now handled by native service
 
-    if (!recipentRef.current) return;
-    socket.emit('shareLocation', {
-      recieverId: recipentRef.current?.recieverId,
-      latitude: location.latitude,
-      longitude: location.longitude,
-      username: recipentRef.current?.username,
-    } as locationPayload);
-    console.log('Location shared');
-  };
+  // Mock location is now handled by native service
 
-  const { location, startMockLocation, stopMockLocation } = useMockLocation({
-    freq: 2000,
-  });
-
-  const startLocationSharing = (recieverId: string, username: string) => {
+  const startLocationSharing = async (recieverId: string, username: string) => {
     if (isSharing) return;
 
     if (!socket || socket.connected === false) {
@@ -80,16 +72,48 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({
 
     setIsSharing(true);
     setRecipentInfo({ recieverId, username });
-    startMockLocation(onLocationUpdate);
+    
+    // Get session data for native service
+    try {
+      if (!user?.accessToken) {
+        ToastAndroid.show('User not authenticated', ToastAndroid.SHORT);
+        return;
+      }
+      
+      const authToken = user.accessToken;
+      const socketUrl = 'https://test-server.chatbucket.chat/'; // From socket.ts
+      
+      // Start native foreground service with session data
+      foregroundService.start('Location sharing active', 'Tap to return to app', {
+        socketUrl,
+        authToken,
+        recieverId,
+        username,
+        intervalMs: 2000
+      });
+      
+      console.log('Native location sharing service started');
+    } catch (e) {
+      console.log('Failed to start location foreground service:', e);
+      ToastAndroid.show('Failed to start location sharing', ToastAndroid.SHORT);
+    }
   };
 
   const stopLocationSharing = () => {
     setIsSharing(false);
     setRecipentInfo(null);
-    stopMockLocation();
+    
+    // Stop native foreground service
+    try {
+      foregroundService.stop();
+      console.log('Native location sharing service stopped');
+    } catch (e) {
+      console.log('Failed to stop location foreground service:', e);
+    }
   };
 
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  
   useEffect(() => {
     if (socket.connected) {
       socket.on('onLocationUpdate', (data: locationPayload) => {
@@ -108,7 +132,10 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({
         // if not contiu
         timerRef.current = setTimeout(() => {
           setRemoteLocation(null);
-          clearTimeout(timerRef.current);
+          if (timerRef.current) {
+            clearTimeout(timerRef.current);
+            timerRef.current = null;
+          }
           ToastAndroid.show('Location ended', ToastAndroid.SHORT);
         }, 5000);
         console.debug('remote location: timer has been set', remoteLocation);
@@ -153,7 +180,7 @@ function useMockLocation(options: options) {
   const { freq } = options;
   const [location, setLocation] = useState<Location | null>(null);
 
-  const intervalRef = useRef<NodeJS.Timer | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const startMockLocation = (
     onLocationUpdate: (location: Location) => void,
