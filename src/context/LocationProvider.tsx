@@ -87,6 +87,7 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({
       foregroundService.start('Location sharing active', 'Tap to return to app', {
         socketUrl,
         authToken,
+        userId: user.id,
         recieverId,
         username,
         intervalMs: 2000

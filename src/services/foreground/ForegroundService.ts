@@ -23,17 +23,18 @@ function safeCall<T extends (...args: any[]) => any>(fn: T | undefined, ...args:
 }
 
 type LocationSession = {
-	socketUrl: string;
-	authToken: string;
-	recieverId: string;
-	username: string;
-	intervalMs?: number;
+  socketUrl: string;
+  authToken: string;
+  userId: string;
+  recieverId: string;
+  username: string;
+  intervalMs?: number;
 };
 
 export const locationForegroundService = {
 	start(title: string, message: string, session?: LocationSession) {
 		if (session) {
-			safeCall(LocationSharing?.startForegroundService, title, message, session.socketUrl, session.authToken, session.recieverId, session.username);
+			safeCall(LocationSharing?.startForegroundService, title, message, session.socketUrl, session.authToken, session.userId, session.recieverId, session.username);
 		} else {
 			safeCall(LocationSharing?.startForegroundService, title, message, '', '', '', '');
 		}
