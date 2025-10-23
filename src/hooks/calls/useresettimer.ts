@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from 'react';
 
 const useResetTimer = (delay: number) => {
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [timerCompleted, setTimerCompleted] = useState(false);
 
   const startTimer = () => {
