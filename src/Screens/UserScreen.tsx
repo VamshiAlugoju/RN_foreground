@@ -14,6 +14,7 @@ import { useCallContext } from '../context/CallProvider';
 import { StartCallParams } from '../types/calls.types';
 import useSocket from '../socket-client/useSocket';
 import { useLocation } from '../context/LocationProvider';
+import { ensureLocationSharingPermissions } from '../utils/permissions';
 
 const UserScreen: FC = () => {
   const { user } = useContext(UserContext);
@@ -94,12 +95,16 @@ const UserItem: FC<{ user: IUser }> = ({ user }) => {
     startCall(payload);
   };
 
-  const handleShareLocation = () => {
+  const handleShareLocation = async () => {
     if (isSharing) {
       stopLocationSharing();
-    } else {
-      startLocationSharing(user.id, selfUser?.name || '');
+      return;
     }
+
+    const ok = await ensureLocationSharingPermissions();
+    if (!ok) return;
+
+    startLocationSharing(user.id, selfUser?.name || '');
   };
 
   return (
