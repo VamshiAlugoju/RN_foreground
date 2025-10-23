@@ -51,6 +51,16 @@ class LocationSharingService : Service() {
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     Log.d("LocationSharingService", "onStartCommand")
 
+    // Handle stop location sharing action
+    when (intent?.action) {
+      "STOP_LOCATION_SHARING" -> {
+        Log.d("LocationSharingService", "Stop location sharing requested")
+        stopLocationSharing()
+        stopSelf()
+        return START_NOT_STICKY
+      }
+    }
+
     val title = intent?.getStringExtra(EXTRA_TITLE) ?: DEFAULT_TITLE
     val message = intent?.getStringExtra(EXTRA_MESSAGE) ?: DEFAULT_MESSAGE
     socketUrl = intent?.getStringExtra(EXTRA_SOCKET_URL) ?: ""
@@ -115,12 +125,13 @@ class LocationSharingService : Service() {
       val channel = NotificationChannel(
         CHANNEL_ID,
         CHANNEL_NAME,
-        NotificationManager.IMPORTANCE_DEFAULT
+        NotificationManager.IMPORTANCE_HIGH // High importance for call-style notifications
       ).apply {
         description = CHANNEL_DESC
         setSound(null, null)
         enableVibration(false)
         lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        setBypassDnd(true) // Bypass Do Not Disturb like calls
       }
       val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
       nm.createNotificationChannel(channel)
@@ -140,6 +151,19 @@ class LocationSharingService : Service() {
       else PendingIntent.FLAG_UPDATE_CURRENT
     )
 
+    // Stop sharing action button
+    val stopIntent = Intent(this, LocationSharingService::class.java).apply {
+      action = "STOP_LOCATION_SHARING"
+    }
+    val stopPendingIntent = PendingIntent.getService(
+      this,
+      1,
+      stopIntent,
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+      else PendingIntent.FLAG_UPDATE_CURRENT
+    )
+
     val builder = NotificationCompat.Builder(this, CHANNEL_ID)
       .setContentTitle(title)
       .setContentText(message)
@@ -147,14 +171,26 @@ class LocationSharingService : Service() {
       .setOngoing(true)
       .setOnlyAlertOnce(true)
       .setContentIntent(contentIntent)
-      .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-      .setCategory(Notification.CATEGORY_SERVICE)
+      .setPriority(NotificationCompat.PRIORITY_HIGH)
+      .setCategory(Notification.CATEGORY_CALL) // Use CALL category like phone calls
       .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
       .setShowWhen(false)
       .setUsesChronometer(false)
+      .addAction(
+        R.drawable.ic_stop,
+        "Stop sharing location",
+        stopPendingIntent
+      )
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
       builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+    }
+
+    // Android 15+ non-dismissable notification
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+      builder.setOngoing(true)
+      builder.setAutoCancel(false)
+      builder.setDeleteIntent(null) // Prevent dismissal
     }
 
     val notification = builder.build()
@@ -339,6 +375,7 @@ class LocationSharingService : Service() {
       stopLocationTimer()
       socket?.disconnect()
       socket = null
+      clearSessionData()
       Log.d("LocationSharingService", "Location sharing stopped")
     } catch (e: Exception) {
       Log.e("LocationSharingService", "Error stopping location sharing: ${e.message}", e)
@@ -427,6 +464,16 @@ class LocationSharingService : Service() {
       
     } catch (e: Exception) {
       Log.e("LocationSharingService", "Error loading session data: ${e.message}", e)
+    }
+  }
+
+  private fun clearSessionData() {
+    try {
+      val prefs = getSharedPreferences("LocationSharingService", Context.MODE_PRIVATE)
+      prefs.edit().clear().apply()
+      Log.d("LocationSharingService", "Session data cleared")
+    } catch (e: Exception) {
+      Log.e("LocationSharingService", "Error clearing session data: ${e.message}", e)
     }
   }
 }

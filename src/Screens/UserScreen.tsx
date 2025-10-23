@@ -23,8 +23,6 @@ const UserScreen: FC = () => {
 
   const { remoteLocation } = useLocation();
 
-  console.log(remoteLocation, 'remoteLocation');
-
   const filteredUsers = userList.filter(u => u.id !== user?.id);
 
   const renderItem = ({ item }: { item: IUser }) => <UserItem user={item} />;
@@ -85,6 +83,9 @@ const UserItem: FC<{ user: IUser }> = ({ user }) => {
 
   const { startLocationSharing, stopLocationSharing, isSharing } =
     useLocation();
+
+  // Debug logging to see what isSharing value we're getting
+  console.log('UserScreen - isSharing:', isSharing, 'for user:', user.name);
 
   const handleStartCall = () => {
     const payload: StartCallParams = {

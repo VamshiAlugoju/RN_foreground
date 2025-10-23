@@ -42,6 +42,15 @@ export const locationForegroundService = {
 	stop() {
 		safeCall(LocationSharing?.stopForegroundService);
 	},
+	isRunning(): Promise<boolean> {
+		return new Promise((resolve) => {
+			// For now, we can't reliably check if the service is running
+			// The native module always exists, so we can't use that as a check
+			// We'll need to implement a proper status check in the native service
+			// For now, return false to prevent false positives
+			resolve(false);
+		});
+	},
 };
 
 export const callForegroundService = {
