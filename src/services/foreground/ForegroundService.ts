@@ -7,7 +7,8 @@ type NativeForegroundService = {
 
 const { LocationSharing, CallService } = NativeModules as {
 	LocationSharing?: NativeForegroundService & {
-		startForegroundService: (title: string, message: string, socketUrl: string, authToken: string, recieverId: string, username: string) => void;
+		startForegroundService: (title: string, message: string, socketUrl: string, authToken: string, userId: string, recieverId: string, username: string) => void;
+		isServiceRunning: () => Promise<boolean>;
 	};
 	CallService?: NativeForegroundService;
 };
@@ -36,20 +37,18 @@ export const locationForegroundService = {
 		if (session) {
 			safeCall(LocationSharing?.startForegroundService, title, message, session.socketUrl, session.authToken, session.userId, session.recieverId, session.username);
 		} else {
-			safeCall(LocationSharing?.startForegroundService, title, message, '', '', '', '');
+			safeCall(LocationSharing?.startForegroundService, title, message, '', '', '', '', '');
 		}
 	},
 	stop() {
 		safeCall(LocationSharing?.stopForegroundService);
 	},
-	isRunning(): Promise<boolean> {
-		return new Promise((resolve) => {
-			// For now, we can't reliably check if the service is running
-			// The native module always exists, so we can't use that as a check
-			// We'll need to implement a proper status check in the native service
-			// For now, return false to prevent false positives
-			resolve(false);
-		});
+	async isRunning(): Promise<boolean> {
+		try {
+			return await LocationSharing?.isServiceRunning() || false;
+		} catch (e) {
+			return false;
+		}
 	},
 };
 

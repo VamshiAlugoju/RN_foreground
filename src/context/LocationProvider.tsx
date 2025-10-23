@@ -54,6 +54,18 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const loadSharingState = async () => {
     try {
+      // Check if the native service is actually running
+      const isServiceRunning = await foregroundService.isRunning();
+      
+      if (!isServiceRunning) {
+        // Service is not running, clear any saved state
+        setIsSharing(false);
+        setRecipentInfo(null);
+        await saveSharingState(false);
+        return;
+      }
+
+      // Service is running, load the saved state
       const savedState = await AsyncStorage.getItem('locationSharingState');
       if (savedState) {
         const { isSharing: savedIsSharing, recieverId: savedRecieverId, username: savedUsername } = JSON.parse(savedState);
@@ -160,31 +172,30 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   };
 
-  // Handle user changes and cleanup
+  // Track previous user ID to detect actual user changes
+  const prevUserIdRef = useRef<string | null>(null);
+
+  // Handle user changes only
   useEffect(() => {
     const handleUserChange = async () => {
-      // Only run if user ID exists (not on initial mount)
-      if (user?.id) {
+      // Only clear sharing state if user actually changed (not initial load)
+      if (user?.id && prevUserIdRef.current && prevUserIdRef.current !== user.id) {
         setIsSharing(false);
         setRecipentInfo(null);
         await saveSharingState(false);
-      }
-    };
-
-    // Run on user change
-    handleUserChange();
-
-    // Cleanup function
-    return () => {
-      // Stop location sharing when component unmounts or user changes
-      if (isSharing) {
         try {
           foregroundService.stop();
         } catch (e) {
           // Service might not be running
         }
       }
+      
+      // Update previous user ID
+      prevUserIdRef.current = user?.id || null;
     };
+
+    // Run on user change
+    handleUserChange();
   }, [user?.id]); // Re-run when user changes
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
