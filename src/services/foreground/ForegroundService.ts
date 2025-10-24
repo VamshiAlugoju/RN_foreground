@@ -60,7 +60,7 @@ export const locationForegroundService = {
 
 export const callForegroundService = {
 	start(title: string, message: string) {
-		safeCall(CallService?.startForegroundService, title, message);
+	safeCall(CallService?.startForegroundService as any, title, message);
 	},
 	stop() {
 		safeCall(CallService?.stopForegroundService);

@@ -52,11 +52,14 @@ import {
 
 import { IUser } from '../types/user.type';
 import { getSocket } from '../socket-client/socket';
-import { NativeModules } from 'react-native';
+import { NativeModules, NativeEventEmitter } from 'react-native';
 
 const { CallService } = NativeModules as {
   CallService?: {
-    startForegroundService: (title: string, message: string) => void;
+    startForegroundService: (
+      callType?: 'outgoing' | 'incoming' | 'ongoing',
+      username?: string,
+    ) => void;
     stopForegroundService: () => void;
   };
 };
@@ -119,6 +122,38 @@ function CallProvider({ children }: { children: React.ReactNode }) {
   } = useCallNotifications();
 
   const inCallController = useInCallManager();
+
+  // Bridge events from native notification actions → JS call handlers
+  useEffect(() => {
+    if (!CallService) return;
+    const callEventEmitter = new NativeEventEmitter(CallService as any);
+    const onAccept = callEventEmitter.addListener(
+      'CALL_ACCEPTED_FROM_NOTIFICATION',
+      () => {
+        if (currentCallDetails?.roomId) {
+          answerCall({ roomId: currentCallDetails.roomId });
+        }
+      },
+    );
+    const onReject = callEventEmitter.addListener(
+      'CALL_REJECTED_FROM_NOTIFICATION',
+      () => {
+        rejectCall();
+      },
+    );
+    const onEnd = callEventEmitter.addListener(
+      'CALL_ENDED_FROM_NOTIFICATION',
+      () => {
+        endCall('ongoing');
+      },
+    );
+
+    return () => {
+      onAccept.remove();
+      onReject.remove();
+      onEnd.remove();
+    };
+  }, [currentCallDetails]);
 
   // Simple connection status check
   const [isConnectionRestored, setIsConnectionRestored] = useState(false);
@@ -270,7 +305,8 @@ function CallProvider({ children }: { children: React.ReactNode }) {
             
             // Ensure foreground service is running after restoring call
             try {
-              CallService?.startForegroundService?.('Ongoing call', 'Tap to return');
+              const username = callData?.initiatorDetails?.name || '';
+              CallService?.startForegroundService?.('ongoing', username);
             } catch (e) {
               console.log('Failed to start foreground service on restore:', e);
             }
@@ -389,7 +425,9 @@ function CallProvider({ children }: { children: React.ReactNode }) {
       
       // Start foreground service when call begins
       try {
-        CallService?.startForegroundService?.('Calling...', 'Tap to return');
+        // Prefer recipient name for better UX
+        const primaryRecipient = recipentList?.[0]?.name || recipients?.[0]?.name || '';
+        CallService?.startForegroundService?.('outgoing', primaryRecipient);
         // Save call state to persist across app restarts
         await AsyncStorage.setItem('ongoingCall', JSON.stringify({
           state: 'outgoing',
@@ -647,7 +685,8 @@ function CallProvider({ children }: { children: React.ReactNode }) {
         
         // Ensure service is running when call becomes active
         try {
-          CallService?.startForegroundService?.('Ongoing call', 'Tap to return');
+          const username = currentCallDetails?.recipients?.[0]?.name || '';
+          CallService?.startForegroundService?.('ongoing', username);
         } catch (e) {
           console.log('Failed to start foreground service on answer:', e);
         }
@@ -821,7 +860,8 @@ function CallProvider({ children }: { children: React.ReactNode }) {
       
       // Ensure caller's notification reflects ongoing state
       try {
-          CallService?.startForegroundService?.('Ongoing call', 'Tap to return');
+          const username = currentCallDetails?.recipients?.[0]?.name || '';
+          CallService?.startForegroundService?.('ongoing', username);
       } catch (e) {
         console.log('Failed to update foreground notification on answer:', e);
       }
@@ -1015,10 +1055,8 @@ function CallProvider({ children }: { children: React.ReactNode }) {
     startIncomingCallTimer(ignoreCall);
     // Show incoming call notification before user answers
     try {
-      const title = data?.initiatorDetails?.name
-        ? `Incoming call from ${data.initiatorDetails.name}`
-        : 'Incoming call';
-      CallService?.startForegroundService?.(title, 'Tap to answer');
+      const username = data?.initiatorDetails?.name || '';
+      CallService?.startForegroundService?.('incoming', username);
     } catch (e) {
       console.log('Failed to start incoming call foreground notification:', e);
     }
