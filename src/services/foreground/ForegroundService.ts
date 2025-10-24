@@ -1,4 +1,4 @@
-import { NativeModules } from 'react-native';
+import { NativeModules, NativeEventEmitter } from 'react-native';
 
 type NativeForegroundService = {
 	startForegroundService?: (title: string, message: string) => void;
@@ -32,6 +32,8 @@ type LocationSession = {
   intervalMs?: number;
 };
 
+// Create event emitter for location sharing events
+const locationEventEmitter = LocationSharing ? new NativeEventEmitter(LocationSharing as any) : null;
 export const locationForegroundService = {
 	start(title: string, message: string, session?: LocationSession) {
 		if (session) {
@@ -49,6 +51,10 @@ export const locationForegroundService = {
 		} catch (e) {
 			return false;
 		}
+	},
+	// Event emitter for listening to native events
+	getEventEmitter() {
+		return locationEventEmitter;
 	},
 };
 

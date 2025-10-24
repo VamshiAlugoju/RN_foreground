@@ -8,11 +8,38 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.WritableMap
+import com.facebook.react.bridge.Arguments
+import com.facebook.react.modules.core.DeviceEventManagerModule
 
 class LocationSharingModule(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     override fun getName(): String = "LocationSharing"
+
+    companion object {
+        private var instance: LocationSharingModule? = null
+        
+        fun getInstance(): LocationSharingModule? = instance
+    }
+
+    init {
+        instance = this
+    }
+
+    private fun sendEvent(eventName: String, params: WritableMap? = null) {
+        if (reactContext.hasActiveCatalystInstance()) {
+            reactContext
+            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+            .emit(eventName, params)
+        } else {
+            Log.w("LocationSharingModule", "React context not active. Event $eventName not sent.")
+        }
+    }
+    
+    fun emitServiceStoppedEvent() {
+        sendEvent("LocationSharingServiceStopped")
+    }
 
     @ReactMethod
     fun startForegroundService(title: String, message: String, socketUrl: String, authToken: String, userId: String, recieverId: String, username: String) {

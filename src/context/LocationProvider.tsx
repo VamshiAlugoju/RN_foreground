@@ -52,6 +52,22 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({
     loadSharingState();
   }, []);
 
+  // Listen for native events when service is stopped via notification
+  useEffect(() => {
+    const eventEmitter = foregroundService.getEventEmitter();
+    if (!eventEmitter) return;
+
+    const subscription = eventEmitter.addListener('LocationSharingServiceStopped', () => {
+      // Update state when service is stopped via notification
+      setIsSharing(false);
+      setRecipentInfo(null);
+      saveSharingState(false);
+      ToastAndroid.show('Location sharing stopped', ToastAndroid.SHORT);
+    });
+
+    return () => subscription.remove();
+  }, []);
+
   const loadSharingState = async () => {
     try {
       // Check if the native service is actually running
