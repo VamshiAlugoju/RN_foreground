@@ -25,7 +25,6 @@ import java.util.TimerTask
 class LocationSharingService : Service() {
   private var wakeLock: PowerManager.WakeLock? = null
   private var wifiLock: WifiManager.WifiLock? = null
-  private var heartbeatTimer: Timer? = null
   private var notificationCheckTimer: Timer? = null
   private var locationTimer: Timer? = null
   private var socket: Socket? = null
@@ -92,7 +91,6 @@ class LocationSharingService : Service() {
     ensureWakeLock()
     ensureWifiLock()
 
-    startHeartbeat()
     startLocationSharing()
     return START_STICKY
   }
@@ -122,7 +120,6 @@ class LocationSharingService : Service() {
   override fun onDestroy() {
     super.onDestroy()
     Log.d("LocationSharingService", "onDestroy called")
-    stopHeartbeat()
     stopNotificationChecker()
     stopLocationSharing()
     try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
@@ -228,31 +225,6 @@ class LocationSharingService : Service() {
     private const val DEFAULT_MESSAGE = "Tap to return to app"
   }
 
-  private fun startHeartbeat() {
-    if (heartbeatTimer != null) return
-    Log.d("LocationSharingService", "Heartbeat started")
-    try {
-      heartbeatTimer = Timer("LocationServiceHeartbeat", true).apply {
-        scheduleAtFixedRate(object : TimerTask() {
-          override fun run() {
-            Log.d("LocationSharingService", "Heartbeat: service is alive")
-          }
-        }, 0L, 2500L)
-      }
-    } catch (t: Throwable) {
-      Log.e("LocationSharingService", "Failed to start heartbeat: ${t.message}")
-    }
-  }
-
-  private fun stopHeartbeat() {
-    try {
-      heartbeatTimer?.cancel()
-      Log.d("LocationSharingService", "Heartbeat stopped")
-    } catch (_: Throwable) {
-    } finally {
-      heartbeatTimer = null
-    }
-  }
 
   private fun ensureWakeLock() {
     try {
