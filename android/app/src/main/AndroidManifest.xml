@@ -77,14 +77,12 @@
         android:name=".callservice.CallForegroundService"
         android:exported="false"
         android:foregroundServiceType="microphone"
-        android:stopWithTask="false"
-        android:process=":callservice" />
+        android:stopWithTask="false" />
 
       <service
         android:name=".locationsharing.LocationSharingService"
         android:exported="false"
         android:foregroundServiceType="location"
-        android:stopWithTask="false"
-        android:process=":locationsharing" />
+        android:stopWithTask="false" />
     </application>
 </manifest>

@@ -56,6 +56,15 @@ class LocationSharingService : Service() {
       "STOP_LOCATION_SHARING" -> {
         Log.d("LocationSharingService", "Stop location sharing requested")
         stopLocationSharing()
+        clearSessionData() // Ensure session data is cleared when stopped via notification
+        
+        // Emit event to notify React Native that service was stopped via notification
+        try {
+          LocationSharingModule.getInstance()?.emitServiceStoppedEvent()
+        } catch (e: Exception) {
+          Log.e("LocationSharingService", "Error emitting service stopped event: ${e.message}")
+        }
+        
         stopSelf()
         return START_NOT_STICKY
       }
