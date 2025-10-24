@@ -39,6 +39,7 @@ import {
   requestCameraPermission,
   requestMicrophonePermission,
   requestNotificationPermission,
+  requestForegroundServicePhoneCallPermission,
 } from '../utils/permissions';
 import { useMe } from '../hooks/util/useMe';
 import { Client } from '../lib/Client';
@@ -214,6 +215,10 @@ function CallProvider({ children }: { children: React.ReactNode }) {
       
       // Request microphone permission (essential for calling app)
       await requestMicrophonePermission();
+      
+      // Request foreground service phone call permission on Android 14+ (API 34)
+      // Required for call foreground service to function properly
+      await requestForegroundServicePhoneCallPermission();
     };
     
     requestEssentialPermissions();

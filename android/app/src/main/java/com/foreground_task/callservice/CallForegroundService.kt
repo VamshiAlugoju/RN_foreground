@@ -1,5 +1,6 @@
 package com.foreground_task.callservice
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -53,6 +55,18 @@ class CallForegroundService : Service() {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     Log.d("CallForegroundService", "onStartCommand")
+    
+    // React Native side should request FOREGROUND_SERVICE_PHONE_CALL permission before starting this service (Android 14+)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+      val hasPermission = checkSelfPermission(
+        Manifest.permission.FOREGROUND_SERVICE_PHONE_CALL
+      ) == PackageManager.PERMISSION_GRANTED
+      if (!hasPermission) {
+        Log.w("CallForegroundService", "Missing FOREGROUND_SERVICE_PHONE_CALL permission; stopping service")
+        stopSelf()
+        return START_NOT_STICKY
+      }
+    }
     
     // Handle action button presses first
     val action = intent?.action
