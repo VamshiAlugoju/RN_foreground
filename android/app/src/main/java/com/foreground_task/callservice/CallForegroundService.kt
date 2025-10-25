@@ -21,6 +21,9 @@ import androidx.core.graphics.drawable.IconCompat
 import com.foreground_task.callservice.CallServiceModule
 import com.foreground_task.MainActivity
 import com.foreground_task.R
+import io.socket.client.IO
+import io.socket.client.Socket
+import org.json.JSONObject
 import java.util.Timer
 import java.util.TimerTask
 
@@ -32,10 +35,27 @@ class CallForegroundService : Service() {
   private var currentTitle: String = "Call in progress"
   private var currentMessage: String = DEFAULT_MESSAGE
   private var currentType: String = CALL_TYPE_ONGOING
+  
+  // Cached call context from SharedPreferences
+  // Note: We create temporary sockets on-demand instead of maintaining a persistent connection
+  // This prevents interference with the React Native socket connection
+  private var socketUrl: String? = null
+  private var accessToken: String? = null
+  private var userId: String? = null
+  private var callId: String? = null
+  private var roomId: String? = null
+  private var clientCallId: String? = null
+  private var initiatorId: String? = null
+  private var callType: String? = null
+  private var callState: String? = null
 
   override fun onCreate() {
     super.onCreate()
     Log.d("CallForegroundService", "onCreate called")
+    
+    // Load saved call context from SharedPreferences
+    loadCallContext()
+    
     ensureChannel()
     startNotificationChecker()
     // Start immediately with minimal notification to satisfy 5s requirement on some OEMs
@@ -71,43 +91,110 @@ class CallForegroundService : Service() {
     // Handle action button presses first
     val action = intent?.action
     if (!action.isNullOrEmpty()) {
-      when (action) {
-        ACTION_END_CALL -> {
-          Log.d("CallService", "Call ended")
-          CallServiceModule.getInstance()?.emitCallEndedEvent()
-          stopSelf()
-          return START_NOT_STICKY
+      // Reload call context in case it was cleared
+      loadCallContext()
+      
+      // Check if React Native is alive
+      val isRnAlive = CallServiceModule.getInstance()?.isReactNativeAlive() == true
+      
+      if (isRnAlive) {
+        // RN is alive - use standard event emission
+        Log.d("CallService", "React Native is alive, using RN bridge for action: $action")
+        when (action) {
+          ACTION_END_CALL -> {
+            Log.d("CallService", "Call ended")
+            CallServiceModule.getInstance()?.emitCallEndedEvent()
+            stopSelf()
+            return START_NOT_STICKY
+          }
+          ACTION_ACCEPT_CALL -> {
+            Log.d("CallService", "Call accepted")
+            CallServiceModule.getInstance()?.emitCallAcceptedEvent()
+            
+            // Bring app to foreground if it's in background
+            try {
+              val isRnActive = CallServiceModule.getInstance()?.isReactNativeAlive() == true
+              if (!isRnActive) {
+                // Activity not visible, launch it
+                val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+                  addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+                launchIntent?.let { startActivity(it) }
+                Log.d("CallService", "Launched RN activity (was in background)")
+              }
+            } catch (e: Exception) {
+              Log.e("CallService", "Failed to bring activity to foreground: ${e.message}", e)
+            }
+          }
+          ACTION_REJECT_CALL -> {
+            Log.d("CallService", "Call rejected")
+            CallServiceModule.getInstance()?.emitCallRejectedEvent()
+            stopSelf()
+            return START_NOT_STICKY
+          }
         }
-        ACTION_ACCEPT_CALL -> {
-          Log.d("CallService", "Call accepted")
-          CallServiceModule.getInstance()?.emitCallAcceptedEvent()
-        }
-        ACTION_REJECT_CALL -> {
-          Log.d("CallService", "Call rejected")
-          CallServiceModule.getInstance()?.emitCallRejectedEvent()
-          stopSelf()
-          return START_NOT_STICKY
+        
+        // Reassert the foreground with the latest known state
+        try {
+          val ongoing = buildNotification(currentTitle, currentMessage, currentType)
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+              NOTIFICATION_ID,
+              ongoing,
+              ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+            )
+          } else {
+            startForeground(NOTIFICATION_ID, ongoing)
+          }
+        } catch (_: Throwable) {}
+        
+        ensureWakeLock()
+        ensureWifiLock()
+        startHeartbeat()
+        return START_STICKY
+      } else {
+        // RN is dead - use native socket fallback
+        Log.w("CallService", "React Native is DEAD, using native socket fallback for action: $action")
+        Log.d("CallService", "Context available: socketUrl=$socketUrl, userId=$userId, callId=$callId, roomId=$roomId")
+        
+        when (action) {
+          ACTION_END_CALL -> {
+            emitEvent("calls:end", mapOf(
+              "callId" to callId,
+              "clientId" to userId,
+              "roomId" to roomId
+            ))
+            return START_NOT_STICKY
+          }
+          ACTION_REJECT_CALL -> {
+            emitEvent("REJECT_CALL", mapOf(
+              "callId" to callId,
+              "clientId" to userId,
+              "roomId" to roomId
+            ))
+            return START_NOT_STICKY
+          }
+          ACTION_ACCEPT_CALL -> {
+            // Emit socket event
+            emitEvent("calls:answer", mapOf(
+              "roomId" to roomId
+            ))
+            
+            // Launch React Native activity so user sees the call UI
+            try {
+              val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+              }
+              launchIntent?.let { startActivity(it) }
+              Log.d("CallService", "Launched RN activity after accepting call from notification")
+            } catch (e: Exception) {
+              Log.e("CallService", "Failed to launch activity: ${e.message}", e)
+            }
+            
+            return START_STICKY
+          }
         }
       }
-
-      // Reassert the foreground with the latest known state
-      try {
-        val ongoing = buildNotification(currentTitle, currentMessage, currentType)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-          startForeground(
-            NOTIFICATION_ID,
-            ongoing,
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
-          )
-        } else {
-          startForeground(NOTIFICATION_ID, ongoing)
-        }
-      } catch (_: Throwable) {}
-
-      ensureWakeLock()
-      ensureWifiLock()
-      startHeartbeat()
-      return START_STICKY
     }
 
     // Read extras - support both new (title, message, type) and legacy (callType, username) parameters
@@ -189,10 +276,18 @@ class CallForegroundService : Service() {
 
   override fun onTaskRemoved(rootIntent: Intent?) {
     // On some Android 12 devices, re-start to remain alive after task swipe
+    // IMPORTANT: Preserve the current notification state (incoming/outgoing/ongoing)
     try {
-      val restartIntent = Intent(applicationContext, CallForegroundService::class.java)
+      val restartIntent = Intent(applicationContext, CallForegroundService::class.java).apply {
+        putExtra(EXTRA_TITLE, currentTitle)
+        putExtra(EXTRA_MESSAGE, currentMessage)
+        putExtra(EXTRA_TYPE, currentType) 
+      }
       androidx.core.content.ContextCompat.startForegroundService(applicationContext, restartIntent)
-    } catch (_: Throwable) {}
+      Log.d("CallForegroundService", "Service restarted after task removed with type: $currentType")
+    } catch (e: Exception) {
+      Log.e("CallForegroundService", "Failed to restart service: ${e.message}", e)
+    }
     super.onTaskRemoved(rootIntent)
   }
 
@@ -486,6 +581,134 @@ class CallForegroundService : Service() {
       }
     } catch (e: Exception) {
       Log.e("CallForegroundService", "Error checking notification: ${e.message}", e)
+    }
+  }
+
+  /**
+   * Load call context from SharedPreferences.
+   * This context is persisted by React Native via updateCallContext().
+   */
+  private fun loadCallContext() {
+    try {
+      val prefs = getSharedPreferences("call_context", Context.MODE_PRIVATE)
+      val allKeys = prefs.all
+      Log.d("NativeSocket", "Loading call context, available keys: ${allKeys.keys}")
+      
+      socketUrl = prefs.getString("socketUrl", null)
+      accessToken = prefs.getString("accessToken", null)
+      userId = prefs.getString("userId", null)
+      callId = prefs.getString("callId", null)
+      roomId = prefs.getString("roomId", null)
+      clientCallId = prefs.getString("clientCallId", null)
+      initiatorId = prefs.getString("initiatorId", null)
+      callType = prefs.getString("callType", null)
+      callState = prefs.getString("state", null)
+      
+      if (socketUrl == null || accessToken == null) {
+        Log.w("NativeSocket", "⚠️ Critical context missing! socketUrl=$socketUrl, accessToken=$accessToken")
+      } else {
+        Log.d("NativeSocket", "✅ Context loaded: socketUrl=$socketUrl | userId=$userId | callId=$callId | roomId=$roomId")
+      }
+    } catch (e: Exception) {
+      Log.e("NativeSocket", "Failed to load call context: ${e.message}", e)
+    }
+  }
+
+  /**
+   * Emit a socket event with payload using a temporary one-time connection.
+   * Creates socket on-demand, emits event, then closes immediately.
+   * This prevents interference with the React Native socket connection.
+   */
+  private fun emitEvent(event: String, payload: Map<String, Any?>) {
+    if (socketUrl.isNullOrBlank() || accessToken.isNullOrBlank()) {
+      Log.e("NativeSocket", "Cannot emit $event: missing socketUrl or accessToken")
+      clearPersistedCallState()
+      stopSelf()
+      return
+    }
+    
+    // Filter out null values from payload
+    val filteredPayload = payload.filterValues { it != null }
+    val jsonPayload = JSONObject(filteredPayload)
+    
+    Log.d("NativeSocket", "Creating temporary socket connection for event: $event")
+    
+    try {
+      // Create a temporary socket for this single event
+      val opts = IO.Options().apply {
+        query = "token=$accessToken"
+        reconnection = false  // Don't reconnect - this is one-time use
+        timeout = 5000
+      }
+      
+      val tempSocket = IO.socket(socketUrl ?: return, opts)
+      
+      tempSocket.once(Socket.EVENT_CONNECT) {
+        Log.d("NativeSocket", "✅ Temporary socket connected, emitting $event: $jsonPayload")
+        tempSocket.emit(event, jsonPayload)
+        
+        // Close immediately after emitting
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+          tempSocket.disconnect()
+          tempSocket.close()
+          Log.d("NativeSocket", "✅ Temporary socket closed after emitting $event")
+          
+          // Clear persisted call state to prevent ghost calls when app reopens
+          clearPersistedCallState()
+          
+          stopSelf()
+        }, 500)  // Small delay to ensure event is sent
+      }
+      
+      tempSocket.on(Socket.EVENT_CONNECT_ERROR) { args ->
+        Log.e("NativeSocket", "❌ Failed to connect temporary socket: ${args.joinToString()}")
+        tempSocket.close()
+        clearPersistedCallState()
+        stopSelf()
+      }
+      
+      tempSocket.connect()
+      
+    } catch (e: Exception) {
+      Log.e("NativeSocket", "❌ Error creating temporary socket: ${e.message}", e)
+      clearPersistedCallState()
+      stopSelf()
+    }
+  }
+
+  /**
+   * Clear persisted call state and set a flag that native ended the call.
+   * This prevents "ghost calls" from appearing when the app is reopened.
+   * 
+   * Strategy: Instead of trying to manipulate React Native's AsyncStorage 
+   * (which is fragile and version-dependent), we:
+   * 1. Set a "nativeEndedCall" flag FIRST (while we still have the callId)
+   * 2. Then clear our own call_context
+   * 3. React Native checks this flag on startup and ignores stale calls
+   */
+  private fun clearPersistedCallState() {
+    try {
+      Log.d("NativeSocket", "Clearing persisted call state for callId: $callId")
+      
+      // IMPORTANT: Set flag BEFORE clearing context (while we still have callId)
+      if (callId != null) {
+        val nativeCallEndPrefs = getSharedPreferences("native_call_actions", Context.MODE_PRIVATE)
+        nativeCallEndPrefs.edit()
+          .putLong("lastNativeEndCallTimestamp", System.currentTimeMillis())
+          .putString("lastEndedCallId", callId)
+          .apply()
+        Log.d("NativeSocket", "✅ Set nativeEndedCall flag for callId: $callId")
+      } else {
+        Log.w("NativeSocket", "⚠️ Cannot set nativeEndedCall flag: callId is null")
+      }
+      
+      // Now clear call_context SharedPreferences (our native storage)
+      val callContextPrefs = getSharedPreferences("call_context", Context.MODE_PRIVATE)
+      callContextPrefs.edit().clear().apply()
+      Log.d("NativeSocket", "✅ Cleared call_context SharedPreferences")
+      
+    } catch (e: Exception) {
+      Log.e("NativeSocket", "❌ Error clearing persisted call state: ${e.message}", e)
     }
   }
 

@@ -52,7 +52,7 @@ import {
 } from '../hooks/calls/useInCallManager';
 
 import { IUser } from '../types/user.type';
-import { getSocket } from '../socket-client/socket';
+import { getSocket, socketURL } from '../socket-client/socket';
 import { NativeModules, NativeEventEmitter } from 'react-native';
 
 const { CallService } = NativeModules as {
@@ -62,6 +62,18 @@ const { CallService } = NativeModules as {
       username?: string,
     ) => void;
     stopForegroundService: () => void;
+    updateCallContext: (params: {
+      accessToken?: string;
+      socketUrl?: string;
+      userId?: string;
+      callId?: string;
+      roomId?: string;
+      clientCallId?: string;
+      initiatorId?: string;
+      callType?: string;
+      state?: string;
+    }) => void;
+    getLastNativeEndedCallId: (callback: (callId: string | null, timestamp: number) => void) => void;
   };
 };
 
@@ -230,11 +242,36 @@ function CallProvider({ children }: { children: React.ReactNode }) {
           const callData = JSON.parse(savedCall);
           console.log('Found persisted call state:', callData);
           
+          // Check if native ended this call while RN was dead
+          const checkNativeEndedCall = () => {
+            return new Promise<boolean>((resolve) => {
+              if (!CallService?.getLastNativeEndedCallId) {
+                resolve(false);
+                return;
+              }
+              
+              CallService.getLastNativeEndedCallId((nativeEndedCallId, timestamp) => {
+                if (nativeEndedCallId === callData.callId) {
+                  console.log('✅ Native ended this call, clearing stale data');
+                  resolve(true);
+                } else {
+                  resolve(false);
+                }
+              });
+            });
+          };
+          
+          const wasNativeEnded = await checkNativeEndedCall();
+          if (wasNativeEnded) {
+            await AsyncStorage.removeItem('ongoingCall');
+            return;
+          }
+          
           // Check if call is recent (within last 5 minutes)
           const isRecent = Date.now() - callData.timestamp < 5 * 60 * 1000;
           if (isRecent) {
             console.log('Original saved state:', callData.state);
-            console.log('Forcing to ongoing state for both devices');
+            console.log('Restoring call with original state:', callData.state);
             console.log('Restored participants:', callData.participants);
             console.log('Restored recipients:', callData.recipients);
             console.log('Restored recipentList:', callData.recipientList);
@@ -290,10 +327,11 @@ function CallProvider({ children }: { children: React.ReactNode }) {
               }
             }
             
-            // Force both devices to ongoing state for consistent UI
+            // Restore call with original state (preserve incoming/outgoing/ongoing)
+            const restoredState = callData.state || 'ongoing';
             setCurrentCallDetails(prev => ({
               ...prev,
-              state: 'ongoing', // Both devices show ongoing call UI
+              state: restoredState, // Preserve original state
               clientCallId: callData.clientCallId,
               type: callData.callType,
               roomId: callData.roomId,
@@ -305,13 +343,18 @@ function CallProvider({ children }: { children: React.ReactNode }) {
               recipentList: callData.recipientList || [],
               isGroupCall: callData.recipients ? callData.recipients.length > 1 : false,
               participants: participants,
+              initiatorDetails: callData.initiatorDetails || prev.initiatorDetails,
             }));
-            setShowFullScreenCall(true);
             
-            // Ensure foreground service is running after restoring call
+            // Only show full screen for ongoing calls, not for incoming/outgoing
+            if (restoredState === 'ongoing') {
+              setShowFullScreenCall(true);
+            }
+            
+            // Ensure foreground service is running with correct notification type
             try {
-              const username = callData?.initiatorDetails?.name || '';
-              CallService?.startForegroundService?.('ongoing', username);
+              const username = callData?.initiatorDetails?.name || callData?.recipients?.[0]?.name || '';
+              CallService?.startForegroundService?.(restoredState as 'incoming' | 'outgoing' | 'ongoing', username);
             } catch (e) {
               console.log('Failed to start foreground service on restore:', e);
             }
@@ -489,6 +532,37 @@ function CallProvider({ children }: { children: React.ReactNode }) {
             type: callType,
             recipentList,
           }));
+          
+          // Persist call context to native for recovery
+          try {
+            CallService?.updateCallContext?.({
+              accessToken: userData?.accessToken,
+              socketUrl: socketURL,
+              userId: userData?.id,
+              callId: callId,
+              roomId: roomId,
+              clientCallId: clientCallId,
+              initiatorId: userData.id,
+              callType: callType,
+              state: 'outgoing',
+            });
+            
+            // Update AsyncStorage with complete outgoing call data
+            await AsyncStorage.setItem('ongoingCall', JSON.stringify({
+              state: 'outgoing',
+              clientCallId,
+              callId,
+              roomId,
+              callType,
+              initiatorId: userData.id,
+              recipients: recipients,
+              recipentList: recipentList,
+              timestamp: Date.now()
+            }));
+          } catch (e) {
+            console.log('Failed to update call context:', e);
+          }
+          
           // startKeepCallAliveTimer(sendCallHeartBeat);
           startAutoEndTimer(() => {
             endCall();
@@ -688,6 +762,23 @@ function CallProvider({ children }: { children: React.ReactNode }) {
           };
         });
         
+        // Persist call context to native when answering call
+        try {
+          CallService?.updateCallContext?.({
+            accessToken: userData?.accessToken,
+            socketUrl: socketURL,
+            userId: userData?.id,
+            callId: callId,
+            roomId: roomId,
+            clientCallId: currentCallDetails?.clientCallId,
+            initiatorId: data.initiatorId,
+            callType: callType,
+            state: 'ongoing',
+          });
+        } catch (e) {
+          console.log('Failed to update call context on answer:', e);
+        }
+        
         // Ensure service is running when call becomes active
         try {
           const username = currentCallDetails?.recipients?.[0]?.name || '';
@@ -738,6 +829,7 @@ function CallProvider({ children }: { children: React.ReactNode }) {
             callId,
             callType,
             initiatorId: data.initiatorId,
+            initiatorDetails: callDetailsForPersistence?.initiatorDetails,
             recipients: callDetailsForPersistence?.recipients || [],
             recipentList: callDetailsForPersistence?.recipentList || [],
             participants: newPartcipants,
@@ -863,6 +955,23 @@ function CallProvider({ children }: { children: React.ReactNode }) {
         };
       });
       
+      // Persist call context to native when call transitions to ongoing (caller side)
+      try {
+        CallService?.updateCallContext?.({
+          accessToken: userData?.accessToken,
+          socketUrl: socketURL,
+          userId: userData?.id,
+          callId: currentCallDetails?.callId,
+          roomId: currentCallDetails?.roomId,
+          clientCallId: currentCallDetails?.clientCallId,
+          initiatorId: currentCallDetails?.initiatorId,
+          callType: currentCallDetails?.type,
+          state: 'ongoing',
+        });
+      } catch (e) {
+        console.log('Failed to update call context on ongoing:', e);
+      }
+      
       // Ensure caller's notification reflects ongoing state
       try {
           const username = currentCallDetails?.recipients?.[0]?.name || '';
@@ -880,6 +989,7 @@ function CallProvider({ children }: { children: React.ReactNode }) {
           callId: callDetailsForPersistence?.callId,
           callType: callDetailsForPersistence?.type,
           initiatorId: callDetailsForPersistence?.initiatorId,
+          initiatorDetails: callDetailsForPersistence?.initiatorDetails,
           recipients: callDetailsForPersistence?.recipients || [],
           recipentList: callDetailsForPersistence?.recipentList || [],
           participants: callDetailsForPersistence?.participants || [],
@@ -1057,11 +1167,42 @@ function CallProvider({ children }: { children: React.ReactNode }) {
       return updateObj;
     });
 
+    // Persist call context to native when incoming call arrives
+    try {
+      CallService?.updateCallContext?.({
+        accessToken: userData?.accessToken,
+        socketUrl: socketURL,
+        userId: userData?.id,
+        callId: data.callId,
+        roomId: data.roomId,
+        clientCallId: currentCallDetails?.clientCallId,
+        initiatorId: data.initiatorId,
+        callType: data.callType,
+        state: 'incoming',
+      });
+    } catch (e) {
+      console.log('Failed to update call context on incoming:', e);
+    }
+
     startIncomingCallTimer(ignoreCall);
+    
     // Show incoming call notification before user answers
     try {
       const username = data?.initiatorDetails?.name || '';
       CallService?.startForegroundService?.('incoming', username);
+      
+      // Save incoming call state to persist across app restarts (non-blocking)
+      AsyncStorage.setItem('ongoingCall', JSON.stringify({
+        state: 'incoming',
+        callId: data.callId,
+        roomId: data.roomId,
+        callType: data.callType,
+        initiatorId: data.initiatorId,
+        initiatorDetails: data.initiatorDetails,
+        recipients: data.recipents || [],
+        recipentList: data.recipentList || [],
+        timestamp: Date.now()
+      })).catch(e => console.log('Failed to save incoming call state:', e));
     } catch (e) {
       console.log('Failed to start incoming call foreground notification:', e);
     }
