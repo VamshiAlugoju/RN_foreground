@@ -1,4 +1,4 @@
-import { Alert, PermissionsAndroid, Platform, ToastAndroid } from 'react-native';
+import { Alert, PermissionsAndroid, Platform, ToastAndroid, Linking } from 'react-native';
 import { requestNotificationPermission } from './notifications';
 
 export const requestLocationBase = async (): Promise<boolean> => {
@@ -47,14 +47,23 @@ export const requestBackgroundLocation = async (): Promise<boolean> => {
   }
 };
 
+
+
 export const ensureLocationSharingPermissions = async (): Promise<boolean> => {
   try {
     if (Platform.OS !== 'android') return true;
+    
+    // 1. Request basic location permissions
     const base = await requestLocationBase();
     if (!base) return false;
+    
+    // 2. Request background location permission
     const bg = await requestBackgroundLocation();
     if (!bg) return false;
+    
+    // 3. Request notification permission
     await requestNotificationPermission();
+    
     return true;
   } catch (e) {
     console.warn('ensureLocationSharingPermissions error:', e);
