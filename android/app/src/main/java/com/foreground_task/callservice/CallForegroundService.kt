@@ -30,8 +30,6 @@ import java.util.TimerTask
 class CallForegroundService : Service() {
   private var wakeLock: PowerManager.WakeLock? = null
   private var wifiLock: WifiManager.WifiLock? = null
-  private var heartbeatTimer: Timer? = null
-  private var notificationCheckTimer: Timer? = null
   private var currentTitle: String = "Call in progress"
   private var currentMessage: String = DEFAULT_MESSAGE
   private var currentType: String = CALL_TYPE_ONGOING
@@ -57,20 +55,6 @@ class CallForegroundService : Service() {
     loadCallContext()
     
     ensureChannel()
-    startNotificationChecker()
-    // Start immediately with minimal notification to satisfy 5s requirement on some OEMs
-    try {
-      val notification = buildNotification("Call in progress", DEFAULT_MESSAGE, CALL_TYPE_ONGOING)
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        startForeground(
-          NOTIFICATION_ID,
-          notification,
-          ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
-        )
-      } else {
-        startForeground(NOTIFICATION_ID, notification)
-      }
-    } catch (_: Throwable) {}
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -150,7 +134,6 @@ class CallForegroundService : Service() {
         
         ensureWakeLock()
         ensureWifiLock()
-        startHeartbeat()
         return START_STICKY
       } else {
         // RN is dead - use native socket fallback
@@ -196,6 +179,7 @@ class CallForegroundService : Service() {
         }
       }
     }
+
 
     // Read extras - support both new (title, message, type) and legacy (callType, username) parameters
     val titleExtra = intent?.getStringExtra(EXTRA_TITLE)
@@ -270,24 +254,10 @@ class CallForegroundService : Service() {
     ensureWakeLock()
     ensureWifiLock()
     
-    startHeartbeat()
     return START_STICKY
   }
 
   override fun onTaskRemoved(rootIntent: Intent?) {
-    // On some Android 12 devices, re-start to remain alive after task swipe
-    // IMPORTANT: Preserve the current notification state (incoming/outgoing/ongoing)
-    try {
-      val restartIntent = Intent(applicationContext, CallForegroundService::class.java).apply {
-        putExtra(EXTRA_TITLE, currentTitle)
-        putExtra(EXTRA_MESSAGE, currentMessage)
-        putExtra(EXTRA_TYPE, currentType) 
-      }
-      androidx.core.content.ContextCompat.startForegroundService(applicationContext, restartIntent)
-      Log.d("CallForegroundService", "Service restarted after task removed with type: $currentType")
-    } catch (e: Exception) {
-      Log.e("CallForegroundService", "Failed to restart service: ${e.message}", e)
-    }
     super.onTaskRemoved(rootIntent)
   }
 
@@ -296,8 +266,6 @@ class CallForegroundService : Service() {
   override fun onDestroy() {
     super.onDestroy()
     Log.d("CallForegroundService", "onDestroy called")
-    stopHeartbeat()
-    stopNotificationChecker()
     try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
     try { wifiLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
   }
@@ -470,31 +438,6 @@ class CallForegroundService : Service() {
     private const val DEFAULT_MESSAGE = "Tap to return to call"
   }
 
-  private fun startHeartbeat() {
-    if (heartbeatTimer != null) return
-    Log.d("CallForegroundService", "Heartbeat started")
-    try {
-      heartbeatTimer = Timer("CallServiceHeartbeat", true).apply {
-        scheduleAtFixedRate(object : TimerTask() {
-          override fun run() {
-            Log.d("CallForegroundService", "Heartbeat: service is alive")
-          }
-        }, 0L, 2500L)
-      }
-    } catch (t: Throwable) {
-      Log.e("CallForegroundService", "Failed to start heartbeat: ${t.message}")
-    }
-  }
-
-  private fun stopHeartbeat() {
-    try {
-      heartbeatTimer?.cancel()
-      Log.d("CallForegroundService", "Heartbeat stopped")
-    } catch (_: Throwable) {
-    } finally {
-      heartbeatTimer = null
-    }
-  }
 
   private fun ensureWakeLock() {
     try {
@@ -518,71 +461,7 @@ class CallForegroundService : Service() {
     } catch (_: Throwable) {}
   }
 
-  private fun startNotificationChecker() {
-    if (notificationCheckTimer != null) return
-    
-    Log.d("CallForegroundService", "Starting notification checker timer...")
-    try {
-      notificationCheckTimer = Timer("NotificationChecker", true)
-      notificationCheckTimer?.scheduleAtFixedRate(object : TimerTask() {
-        override fun run() {
-          checkAndRepostNotification()
-        }
-      }, 3000L, 2000L) // Check every 2 seconds after 3 second delay
-      
-      Log.d("CallForegroundService", "Notification checker timer started")
-    } catch (e: Exception) {
-      Log.e("CallForegroundService", "Failed to start notification checker: ${e.message}")
-    }
-  }
 
-  private fun stopNotificationChecker() {
-    try {
-      notificationCheckTimer?.cancel()
-      Log.d("CallForegroundService", "Notification checker timer stopped")
-    } catch (e: Exception) {
-      Log.e("CallForegroundService", "Error stopping notification checker: ${e.message}")
-    } finally {
-      notificationCheckTimer = null
-    }
-  }
-
-  private fun checkAndRepostNotification() {
-    try {
-      val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-      val activeNotifications = notificationManager.activeNotifications
-      
-      var notificationExists = false
-      for (notification in activeNotifications) {
-        if (notification.id == NOTIFICATION_ID) {
-          notificationExists = true
-          break
-        }
-      }
-      
-      if (!notificationExists) {
-        Log.d("CallForegroundService", "=== NOTIFICATION MISSING - RE-POSTING ===")
-        Log.d("CallForegroundService", "Current title: ${currentTitle}")
-        Log.d("CallForegroundService", "Current message: ${currentMessage}")
-        Log.d("CallForegroundService", "Current type: ${currentType}")
-        
-        val notification = buildNotification(currentTitle, currentMessage, currentType)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-          startForeground(
-            NOTIFICATION_ID,
-            notification,
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
-          )
-        } else {
-          startForeground(NOTIFICATION_ID, notification)
-        }
-        
-        Log.d("CallForegroundService", "=== NOTIFICATION RE-POSTED ===")
-      }
-    } catch (e: Exception) {
-      Log.e("CallForegroundService", "Error checking notification: ${e.message}", e)
-    }
-  }
 
   /**
    * Load call context from SharedPreferences.
