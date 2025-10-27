@@ -131,7 +131,8 @@ eventEmitter.addListener('LocationSharingServiceStopped', () => {
 - Low priority to prevent pop-ups
 - Non-dismissable with "Stop sharing" action
 - Timer-based monitoring to re-post if removed
-- Silent and local-only to minimize disruption
+- Silent (no sound/vibration) but visible on lock screen
+- Local-only (not shown on external devices like smartwatches)
 
 ### 3. Socket Communication
 
