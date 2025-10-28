@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
@@ -35,6 +36,8 @@ class LocationSharingService : Service() {
   private var userId: String = ""
   private var recieverId: String = ""
   private var username: String = ""
+  private var lastLat: Double? = null
+  private var lastLon: Double? = null
 
   override fun onCreate() {
     super.onCreate()
@@ -146,8 +149,17 @@ class LocationSharingService : Service() {
   }
 
   private fun buildNotification(title: String, message: String): Notification {
-    val openIntent = Intent(this, MainActivity::class.java).apply {
+    // Build deep link to LocationDebug screen with last coordinates if available
+    val lat = lastLat
+    val lon = lastLon
+    val uri: Uri = if (lat != null && lon != null) {
+      Uri.parse("foreground://location?lat=$lat&lon=$lon")
+    } else {
+      Uri.parse("foreground://location")
+    }
+    val openIntent = Intent(Intent.ACTION_VIEW, uri).apply {
       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+      `package` = packageName
     }
     val contentIntent = PendingIntent.getActivity(
       this,
@@ -402,6 +414,14 @@ class LocationSharingService : Service() {
         val latitude = (Math.random() * 180 - 90).toDouble()
         val longitude = (Math.random() * 360 - 180).toDouble()
         
+        // Remember last values for notification deep link
+        lastLat = latitude
+        lastLon = longitude
+
+        // Update notification with new coordinates
+        val notification = buildNotification(currentTitle, currentMessage)
+        startForeground(NOTIFICATION_ID, notification)
+
         val locationData = JSONObject().apply {
           put("recieverId", recieverId)
           put("latitude", latitude)
