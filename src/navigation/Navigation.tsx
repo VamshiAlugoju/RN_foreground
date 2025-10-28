@@ -8,6 +8,7 @@ import UserScreen from '../Screens/UserScreen';
 import { NavigationContainer } from '@react-navigation/native';
 import { StatusBar } from 'react-native';
 import { View } from 'react-native';
+import LocationDebugScreen from '../Screens/LocationDebugScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -30,6 +31,7 @@ export const StackNavigator: FC = () => {
     >
       <Stack.Screen name={Screens.MainScreen} component={MainScreen} />
       <Stack.Screen name={Screens.UserScreen} component={UserScreen} />
+      <Stack.Screen name={Screens.LocationDebug} component={LocationDebugScreen} />
     </Stack.Navigator>
   );
 };
@@ -37,11 +39,20 @@ export const StackNavigator: FC = () => {
 export const Screens = {
   MainScreen: 'MainScreen',
   UserScreen: 'UserScreen',
+  LocationDebug: 'LocationDebug',
 };
 
 const RootContainer: FC = () => {
+  const linking = {
+    prefixes: ['foreground://'],
+    config: {
+      screens: {
+        [Screens.LocationDebug]: 'location',
+      },
+    },
+  };
   return (
-    <NavigationContainer>
+    <NavigationContainer linking={linking}>
       <StatusBar
         barStyle="light-content"
         backgroundColor={'white'}

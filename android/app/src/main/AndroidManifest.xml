@@ -71,6 +71,14 @@
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
 
+        <!-- Deep link for opening the LocationDebug screen -->
+        <intent-filter android:autoVerify="false">
+          <action android:name="android.intent.action.VIEW" />
+          <category android:name="android.intent.category.DEFAULT" />
+          <category android:name="android.intent.category.BROWSABLE" />
+          <data android:scheme="foreground" android:host="location" />
+        </intent-filter>
+
         <!-- Notifee foreground service -->
         <!-- <service android:name="app.notifee.core.ForegroundService" android:exported="false" android:foregroundServiceType="mediaProjection|camera|microphone" /> -->
       </activity>
