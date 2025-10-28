@@ -14,6 +14,7 @@ import { useCallContext } from '../context/CallProvider';
 import { StartCallParams } from '../types/calls.types';
 import useSocket from '../socket-client/useSocket';
 import { useLocation } from '../context/LocationProvider';
+import { ensureLocationSharingPermissions } from '../utils/permissions';
 
 const UserScreen: FC = () => {
   const { user } = useContext(UserContext);
@@ -21,8 +22,6 @@ const UserScreen: FC = () => {
   const { socket } = useSocket();
 
   const { remoteLocation } = useLocation();
-
-  console.log(remoteLocation, 'remoteLocation');
 
   const filteredUsers = userList.filter(u => u.id !== user?.id);
 
@@ -85,6 +84,9 @@ const UserItem: FC<{ user: IUser }> = ({ user }) => {
   const { startLocationSharing, stopLocationSharing, isSharing } =
     useLocation();
 
+  // Debug logging to see what isSharing value we're getting
+  console.log('UserScreen - isSharing:', isSharing, 'for user:', user.name);
+
   const handleStartCall = () => {
     const payload: StartCallParams = {
       callType: 'audio',
@@ -94,12 +96,16 @@ const UserItem: FC<{ user: IUser }> = ({ user }) => {
     startCall(payload);
   };
 
-  const handleShareLocation = () => {
+  const handleShareLocation = async () => {
     if (isSharing) {
       stopLocationSharing();
-    } else {
-      startLocationSharing(user.id, selfUser?.name || '');
+      return;
     }
+
+    const ok = await ensureLocationSharingPermissions();
+    if (!ok) return;
+
+    startLocationSharing(user.id, selfUser?.name || '');
   };
 
   return (

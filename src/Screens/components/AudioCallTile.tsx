@@ -97,16 +97,22 @@ function AudioRenderer({
     };
   }, [audioTrack]);
 
+  const img = participent?.client?.image?.trim?.() || '';
+  const hasBgImage = img.length > 0;
+
+  const Background: React.FC<{ children: React.ReactNode }> = ({ children }) =>
+    hasBgImage ? (
+      <ImageBackground source={{ uri: img }} style={audioCallTileStyles.bgImage}>
+        {children}
+      </ImageBackground>
+    ) : (
+      <View style={[audioCallTileStyles.bgImage, audioCallTileStyles.bgFallback]}>
+        {children}
+      </View>
+    );
+
   return (
-    <ImageBackground
-      source={{
-        uri: participent.client.image,
-      }}
-      style={[
-        audioCallTileStyles.bgImage,
-        !participent.client.image ? audioCallTileStyles.bgFallback : undefined,
-      ]}
-    >
+    <Background>
       <BlurView blurType="dark" blurAmount={90} />
       <Pressable
         onPress={e => {
@@ -119,11 +125,7 @@ function AudioRenderer({
       >
         <View style={audioCallTileStyles.centerBox}>
           <Image
-            source={
-              participent.client?.image
-                ? { uri: participent.client.image }
-                : DEFAULT_IMAGE
-            }
+            source={hasBgImage ? { uri: img } : DEFAULT_IMAGE}
             style={audioCallTileStyles.avatar}
           />
           <Text style={audioCallTileStyles.username}>
@@ -144,7 +146,7 @@ function AudioRenderer({
           )}
         </View>
       </Pressable>
-    </ImageBackground>
+    </Background>
   );
 }
 

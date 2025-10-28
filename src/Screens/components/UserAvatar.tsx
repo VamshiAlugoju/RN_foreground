@@ -12,6 +12,8 @@ type Props = {
 
 const UserAvatar = ({ url, containerViewStyles, imageStyles }: Props) => {
   const [isImageLoaded, setIsImageLoaded] = useState(false);
+  const img = (url || '').trim();
+  const hasImage = img.length > 0;
 
   return (
     <View
@@ -23,27 +25,31 @@ const UserAvatar = ({ url, containerViewStyles, imageStyles }: Props) => {
         { ...containerViewStyles },
       ]}
     >
-      {!isImageLoaded ||
-        (!url && (
-          <Image
-            source={image}
-            style={[
-              styles.userImage,
-              {
-                ...imageStyles,
-              },
-            ]}
-          />
-        ))}
-      <Image
-        resizeMode="cover"
-        source={{ uri: url }}
-        style={[
-          { ...styles.userImage, opacity: isImageLoaded ? 1 : 0 },
-          { ...imageStyles },
-        ]}
-        onLoadEnd={() => setIsImageLoaded(true)}
-      />
+      {/* Placeholder shown when no URL or while network image loads */}
+      {(!hasImage || !isImageLoaded) && (
+        <Image
+          source={image}
+          style={[
+            styles.userImage,
+            {
+              ...imageStyles,
+            },
+          ]}
+        />
+      )}
+
+      {/* Only render network image if we actually have a non-empty URL */}
+      {hasImage && (
+        <Image
+          resizeMode="cover"
+          source={{ uri: img }}
+          style={[
+            { ...styles.userImage, opacity: isImageLoaded ? 1 : 0 },
+            { ...imageStyles },
+          ]}
+          onLoadEnd={() => setIsImageLoaded(true)}
+        />
+      )}
     </View>
   );
 };

@@ -49,7 +49,7 @@ type OngoingCallProps = {
 type ScreenSharingBannerState = {
   visible: boolean;
   participant: Participant | null;
-  timer: NodeJS.Timeout | null;
+  timer: ReturnType<typeof setTimeout> | null;
 };
 
 // create a component

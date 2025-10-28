@@ -4,6 +4,7 @@ import React, {
   useContext,
   useEffect,
   useState,
+  useRef,
 } from 'react';
 import { useMediasoup } from './RtcProvider';
 import {
@@ -31,32 +32,59 @@ import { Socket } from 'socket.io-client';
 import useSocket from '../socket-client/useSocket';
 import useCallState from '../hooks/calls/useCallState';
 import { callSocketEvents } from '../socket-client/socketEvents';
-import { Alert, PermissionsAndroid, ToastAndroid } from 'react-native';
+import { Alert, PermissionsAndroid, ToastAndroid, Platform } from 'react-native';
 
 import { generateUUID } from '../utils/commonFunction';
 import {
   requestCameraPermission,
   requestMicrophonePermission,
-} from '../utils/usePermission';
+  requestNotificationPermission,
+  requestForegroundServicePhoneCallPermission,
+} from '../utils/permissions';
 import { useMe } from '../hooks/util/useMe';
+import { Client } from '../lib/Client';
 
 import { getAppLanguage } from '../utils/asyncStorage';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   CallDirection,
   useInCallManager,
 } from '../hooks/calls/useInCallManager';
 
 import { IUser } from '../types/user.type';
-import { getSocket } from '../socket-client/socket';
+import { getSocket, socketURL } from '../socket-client/socket';
+import { NativeModules, NativeEventEmitter } from 'react-native';
+
+const { CallService } = NativeModules as {
+  CallService?: {
+    startForegroundService: (
+      callType?: 'outgoing' | 'incoming' | 'ongoing',
+      username?: string,
+    ) => void;
+    stopForegroundService: () => void;
+    updateCallContext: (params: {
+      accessToken?: string;
+      socketUrl?: string;
+      userId?: string;
+      callId?: string;
+      roomId?: string;
+      clientCallId?: string;
+      initiatorId?: string;
+      callType?: string;
+      state?: string;
+    }) => void;
+    getLastNativeEndedCallId: (callback: (callId: string | null, timestamp: number) => void) => void;
+  };
+};
 
 const CallsContext = createContext<ICallsContext | undefined>(undefined);
 
 function CallProvider({ children }: { children: React.ReactNode }) {
-  const { user: userData } = useMe();
+  const { user: userData, setUser } = useMe();
 
   const [showFullScreenCall, setShowFullScreenCall] = useState(true);
 
-  const { socket } = useSocket();
+  const { socket, connectSocket, status } = useSocket();
   const {
     currentCallDetails,
     callDetailsRef,
@@ -108,6 +136,302 @@ function CallProvider({ children }: { children: React.ReactNode }) {
 
   const inCallController = useInCallManager();
 
+  // Bridge events from native notification actions → JS call handlers
+  useEffect(() => {
+    if (!CallService) return;
+    const callEventEmitter = new NativeEventEmitter(CallService as any);
+    const onAccept = callEventEmitter.addListener(
+      'CALL_ACCEPTED_FROM_NOTIFICATION',
+      () => {
+        if (currentCallDetails?.roomId) {
+          answerCall({ roomId: currentCallDetails.roomId });
+        }
+      },
+    );
+    const onReject = callEventEmitter.addListener(
+      'CALL_REJECTED_FROM_NOTIFICATION',
+      () => {
+        rejectCall();
+      },
+    );
+    const onEnd = callEventEmitter.addListener(
+      'CALL_ENDED_FROM_NOTIFICATION',
+      () => {
+        endCall('ongoing');
+      },
+    );
+
+    return () => {
+      onAccept.remove();
+      onReject.remove();
+      onEnd.remove();
+    };
+  }, [currentCallDetails]);
+
+  // Simple connection status check
+  const [isConnectionRestored, setIsConnectionRestored] = useState(false);
+  const reconnectingRef = useRef(false);
+  const latestUserRef = useRef<IUser | null>(null);
+  const latestSocketRef = useRef<Socket | null>(null);
+  const connectionCheckTimerRef = useRef<any>(null);
+  const isConnectionRestoredRef = useRef(false);
+
+  useEffect(() => {
+    latestUserRef.current = userData || null;
+  }, [userData]);
+
+  useEffect(() => {
+    latestSocketRef.current = socket;
+  }, [socket]);
+
+  useEffect(() => {
+    isConnectionRestoredRef.current = isConnectionRestored;
+    if (isConnectionRestored && connectionCheckTimerRef.current) {
+      clearTimeout(connectionCheckTimerRef.current);
+      connectionCheckTimerRef.current = null;
+    }
+  }, [isConnectionRestored]);
+
+  // If a call is active and user is known, ensure socket reconnects after app recreation
+  useEffect(() => {
+    const state = callDetailsRef.current?.state || currentCallDetails?.state;
+    if (
+      (state === 'ongoing' || state === 'outgoing') &&
+      userData &&
+      !socket.connected &&
+      !reconnectingRef.current
+    ) {
+      reconnectingRef.current = true;
+      console.log('Reconnecting socket due to active call and available user...');
+      connectSocket(userData)
+        .then(() => {
+          console.log('Socket reconnected (active call context)');
+          setIsConnectionRestored(true);
+        })
+        .catch(err => {
+          console.log('Socket reconnection failed (active call context):', err);
+        })
+        .finally(() => {
+          reconnectingRef.current = false;
+        });
+    }
+  }, [userData, socket.connected, currentCallDetails?.state]);
+
+
+  // Check for ongoing calls when app starts
+  useEffect(() => {
+    // Proactively request essential permissions on Android
+    const requestEssentialPermissions = async () => {
+      // Request notification permission on Android 13+
+      await requestNotificationPermission();
+      
+      // Request microphone permission (essential for calling app)
+      await requestMicrophonePermission();
+      
+      // Request foreground service phone call permission on Android 14+ (API 34)
+      // Required for call foreground service to function properly
+      await requestForegroundServicePhoneCallPermission();
+    };
+    
+    requestEssentialPermissions();
+
+    const checkForOngoingCall = async () => {
+      try {
+        const savedCall = await AsyncStorage.getItem('ongoingCall');
+        if (savedCall) {
+          const callData = JSON.parse(savedCall);
+          console.log('Found persisted call state:', callData);
+          
+          // Check if native ended this call while RN was dead
+          const checkNativeEndedCall = () => {
+            return new Promise<boolean>((resolve) => {
+              if (!CallService?.getLastNativeEndedCallId) {
+                resolve(false);
+                return;
+              }
+              
+              CallService.getLastNativeEndedCallId((nativeEndedCallId, timestamp) => {
+                if (nativeEndedCallId === callData.callId) {
+                  console.log('✅ Native ended this call, clearing stale data');
+                  resolve(true);
+                } else {
+                  resolve(false);
+                }
+              });
+            });
+          };
+          
+          const wasNativeEnded = await checkNativeEndedCall();
+          if (wasNativeEnded) {
+            await AsyncStorage.removeItem('ongoingCall');
+            return;
+          }
+          
+          // Check if call is recent (within last 5 minutes)
+          const isRecent = Date.now() - callData.timestamp < 5 * 60 * 1000;
+          if (isRecent) {
+            console.log('Original saved state:', callData.state);
+            console.log('Restoring call with original state:', callData.state);
+            console.log('Restored participants:', callData.participants);
+            console.log('Restored recipients:', callData.recipients);
+            console.log('Restored recipentList:', callData.recipientList);
+            
+            // Create participants from recipient data if participants is empty
+            let participants = callData.participants || [];
+            console.log('Participants length:', participants.length);
+            console.log('RecipientList length:', callData.recipientList?.length);
+            console.log('Recipients length:', callData.recipients?.length);
+            
+            if (participants.length === 0) {
+              // Try recipientList first, then fallback to recipients
+              if (callData.recipientList && callData.recipientList.length > 0) {
+                console.log('Creating participants from recipientList');
+                participants = callData.recipientList.map((recipient: any) => ({
+                  userId: recipient._id,
+                  participantId: recipient._id,
+                  audioConsumer: null,
+                  videoConsumer: null,
+                  client: {
+                    id: recipient._id,
+                    name: recipient.name,
+                    username: recipient.username,
+                    image: recipient.image,
+                  },
+                  isScreenSharing: false,
+                  isVideoPaused: false,
+                  isAudioPaused: false,
+                  isAudioMutedByHost: false,
+                  isVideoMutedByHost: false,
+                  participantContact: null,
+                }));
+              } else if (callData.recipients && callData.recipients.length > 0) {
+                console.log('Creating participants from recipients (fallback)');
+                participants = callData.recipients.map((recipient: any) => ({
+                  userId: recipient.id,
+                  participantId: recipient.id,
+                  audioConsumer: null,
+                  videoConsumer: null,
+                  client: {
+                    id: recipient.id,
+                    name: recipient.name,
+                    username: recipient.username,
+                    image: recipient.profilePic || '',
+                  },
+                  isScreenSharing: false,
+                  isVideoPaused: false,
+                  isAudioPaused: false,
+                  isAudioMutedByHost: false,
+                  isVideoMutedByHost: false,
+                  participantContact: null,
+                }));
+              }
+            }
+            
+            // Restore call with original state (preserve incoming/outgoing/ongoing)
+            const restoredState = callData.state || 'ongoing';
+            setCurrentCallDetails(prev => ({
+              ...prev,
+              state: restoredState, // Preserve original state
+              clientCallId: callData.clientCallId,
+              type: callData.callType,
+              roomId: callData.roomId,
+              callId: callData.callId,
+              initiatorId: callData.initiatorId,
+              startedAt: new Date(callData.timestamp),
+              // Add missing fields for proper UI display
+              recipients: callData.recipients || [],
+              recipentList: callData.recipientList || [],
+              isGroupCall: callData.recipients ? callData.recipients.length > 1 : false,
+              participants: participants,
+              initiatorDetails: callData.initiatorDetails || prev.initiatorDetails,
+            }));
+            
+            // Only show full screen for ongoing calls, not for incoming/outgoing
+            if (restoredState === 'ongoing') {
+              setShowFullScreenCall(true);
+            }
+            
+            // Ensure foreground service is running with correct notification type
+            try {
+              const username = callData?.initiatorDetails?.name || callData?.recipients?.[0]?.name || '';
+              CallService?.startForegroundService?.(restoredState as 'incoming' | 'outgoing' | 'ongoing', username);
+            } catch (e) {
+              console.log('Failed to start foreground service on restore:', e);
+            }
+            
+            // Attempt immediate socket reconnection if needed
+            try {
+              if (userData && !socket.connected) {
+                console.log('Immediate socket reconnect after call restore...');
+                await connectSocket(userData);
+                setIsConnectionRestored(true);
+              } else if (!userData && !socket.connected) {
+                // If user data isn't yet in context, try to load from storage and reconnect
+                console.log('Loading stored user for reconnection...');
+                const storedUser = await Client.User.get();
+                if (storedUser) {
+                  try {
+                    await setUser(storedUser);
+                  } catch {}
+                  await connectSocket(storedUser);
+                  setIsConnectionRestored(true);
+                } else {
+                  console.log('No stored user found; socket reconnection will be deferred.');
+                }
+              }
+            } catch (e) {
+              console.log('Immediate socket reconnect failed:', e);
+            }
+            
+            // Start monitoring connection restoration and reconnect socket if needed
+            const checkConnection = () => {
+              const hasUser = !!latestUserRef.current;
+              const isConnected = !!latestSocketRef.current?.connected;
+              if (hasUser && isConnected) {
+                console.log('Connection restored! User data and socket are available');
+                setIsConnectionRestored(true);
+              } else {
+                console.log('Waiting for connection... User data:', hasUser, 'Socket connected:', isConnected);
+                
+                // If we have user data but no socket connection, try to reconnect once per cycle
+                if (hasUser && !isConnected && !reconnectingRef.current) {
+                  reconnectingRef.current = true;
+                  console.log('Attempting socket reconnection...');
+                  connectSocket(latestUserRef.current as IUser)
+                    .then(() => {
+                      console.log('Socket reconnected successfully');
+                      setIsConnectionRestored(true);
+                    })
+                    .catch(err => {
+                      console.log('Socket reconnection failed:', err);
+                    })
+                    .finally(() => {
+                      reconnectingRef.current = false;
+                    });
+                }
+                
+                if (!isConnectionRestoredRef.current) {
+                  connectionCheckTimerRef.current = setTimeout(checkConnection, 2000); // Check every 2 seconds
+                }
+              }
+            };
+            
+            // Start checking after a short delay
+            connectionCheckTimerRef.current = setTimeout(checkConnection, 1000);
+            
+          } else {
+            // Call is too old, clear it
+            await AsyncStorage.removeItem('ongoingCall');
+          }
+        }
+      } catch (e) {
+        console.log('Error checking for ongoing call:', e);
+      }
+    };
+
+    checkForOngoingCall();
+  }, []);
+
   const startCall = useCallback(
     async (params: StartCallParams) => {
       if (!userData) return;
@@ -146,6 +470,24 @@ function CallProvider({ children }: { children: React.ReactNode }) {
         clientCallId,
         type: callType,
       }));
+      
+      // Start foreground service when call begins
+      try {
+        // Prefer recipient name for better UX
+        const primaryRecipient = recipentList?.[0]?.name || recipients?.[0]?.name || '';
+        CallService?.startForegroundService?.('outgoing', primaryRecipient);
+        // Save call state to persist across app restarts
+        await AsyncStorage.setItem('ongoingCall', JSON.stringify({
+          state: 'outgoing',
+          clientCallId,
+          callType,
+          recipients: recipients.map(r => r.id),
+          recipentList: recipentList,
+          timestamp: Date.now()
+        }));
+      } catch (e) {
+        console.log('Failed to start foreground service:', e);
+      }
       const payload = {
         callerId: userData.id,
         recipients: recipients.map(r => r.id),
@@ -190,6 +532,37 @@ function CallProvider({ children }: { children: React.ReactNode }) {
             type: callType,
             recipentList,
           }));
+          
+          // Persist call context to native for recovery
+          try {
+            CallService?.updateCallContext?.({
+              accessToken: userData?.accessToken,
+              socketUrl: socketURL,
+              userId: userData?.id,
+              callId: callId,
+              roomId: roomId,
+              clientCallId: clientCallId,
+              initiatorId: userData.id,
+              callType: callType,
+              state: 'outgoing',
+            });
+            
+            // Update AsyncStorage with complete outgoing call data
+            await AsyncStorage.setItem('ongoingCall', JSON.stringify({
+              state: 'outgoing',
+              clientCallId,
+              callId,
+              roomId,
+              callType,
+              initiatorId: userData.id,
+              recipients: recipients,
+              recipentList: recipentList,
+              timestamp: Date.now()
+            }));
+          } catch (e) {
+            console.log('Failed to update call context:', e);
+          }
+          
           // startKeepCallAliveTimer(sendCallHeartBeat);
           startAutoEndTimer(() => {
             endCall();
@@ -212,10 +585,37 @@ function CallProvider({ children }: { children: React.ReactNode }) {
   /**
    * Ends the call
    */
-  async function endCall(context?: 'outgoing' | 'ongoing') {
+  async function endCall(context?: 'outgoing' | 'ongoing', retryCount: number = 0) {
     try {
+      console.log('endCall called with context:', context, 'retryCount:', retryCount);
       const callDetails = getCallDetails();
-      if (!callDetails || !userData) {
+      console.log('Call details in endCall:', callDetails);
+      console.log('User data in endCall:', userData);
+      console.log('Socket in endCall:', socket);
+      
+      if (!callDetails) {
+        console.log('endCall: Missing callDetails, returning early');
+        return;
+      }
+      
+      if (!userData && retryCount < 3) {
+        console.log('endCall: User data not loaded yet, waiting... (retry', retryCount + 1, '/3)');
+        // Wait a bit for user data to load, then retry
+        setTimeout(() => {
+          console.log('endCall: Retrying after user data load');
+          endCall(context, retryCount + 1);
+        }, 1000);
+        return;
+      }
+      
+      if (!userData && retryCount >= 3) {
+        console.log('endCall: User data still not loaded after 3 retries, cannot end call');
+        console.log('EndCall button disabled - no server connection available');
+        if (isConnectionRestored) {
+          ToastAndroid.show('Connection restored! EndCall button should work now.', ToastAndroid.SHORT);
+        } else {
+          ToastAndroid.show('Cannot end call - no connection to server. Please wait for connection to restore.', ToastAndroid.LONG);
+        }
         return;
       }
       // setShowFullScreenCall(false);
@@ -223,38 +623,100 @@ function CallProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      if (callDetails.initiatorId === userData.id) {
+      // Ensure socket is connected before emitting termination events
+      if (!socket.connected && userData && !reconnectingRef.current) {
+        try {
+          reconnectingRef.current = true;
+          console.log('endCall: Socket not connected, attempting quick reconnect...');
+          await connectSocket(userData);
+          console.log('endCall: Reconnect success');
+        } catch (e) {
+          console.log('endCall: Reconnect failed, proceeding with local cleanup:', e);
+        } finally {
+          reconnectingRef.current = false;
+        }
+      }
+
+      console.log('Socket connected:', socket.connected);
+      console.log('Initiator ID:', callDetails.initiatorId);
+      const currentUser = userData as IUser;
+      console.log('User ID:', currentUser.id);
+      
+      // Log who is ending the call
+      const isInitiator = callDetails.initiatorId === currentUser.id;
+      console.log(`[CALLER] endCall triggered by ${isInitiator ? 'CALLER (initiator)' : 'RECEIVER (participant)'}`);
+      console.log(`[CALLER] Call details:`, {
+        callId: callDetails.callId,
+        roomId: callDetails.roomId,
+        initiatorId: callDetails.initiatorId,
+        currentUserId: currentUser.id,
+        state: callDetails.state,
+      });
+      
+      if (callDetails.initiatorId === currentUser.id) {
+        console.log('[CALLER] User is call initiator, emitting END_CALL event (original working version)');
         socket.emit(callSocketEvents.END_CALL, {
           callId: callDetails.callId,
-          clientId: userData.id,
+          clientId: currentUser.id,
           roomId: callDetails.roomId,
         });
+        console.log('[CALLER] END_CALL emitted immediately (original working behavior)');
+        
       } else if (callDetails.roomId && callDetails.roomId) {
+        console.log('[RECEIVER] User is participant, emitting LEAVE_CALL event');
         socket.emit(callSocketEvents.LEAVE_CALL, {
           callId: callDetails.callId,
-          clientId: userData.id,
+          clientId: currentUser.id,
           roomId: callDetails.roomId,
         });
+        console.log('[RECEIVER] LEAVE_CALL emitted immediately (no delay - original behavior)');
       }
 
       if (context === 'outgoing') {
+        console.log('[CALLER/RECEIVER] Context is "outgoing", emitting END_OUTGOING_CALL');
         socket.emit(
           callSocketEvents.END_OUTGOING_CALL,
           {
             clientCallId: callDetails.clientCallId,
           },
           (resp: any) => {
-            console.log('end outgoing call response', resp);
+            console.log('[CALLER/RECEIVER] END_OUTGOING_CALL response:', resp);
           },
         );
       }
 
+      // ✅ Now safe to cleanup - socket events have been transmitted
+      console.log('[CALLER/RECEIVER] Starting local cleanup...');
+      console.log('[CALLER/RECEIVER] Step 1: Resetting call details');
       resetCallDetails();
+
+      console.log('[CALLER/RECEIVER] Step 2: Removing media device');
       removeDevice();
+
+      console.log('[CALLER/RECEIVER] Step 3: Resetting auto-end timer');
       resetAutoEndTimer();
+
+      console.log('[CALLER/RECEIVER] Step 4: Stopping media producers');
       mediaProducers.stopProducing();
+
+      console.log('[CALLER/RECEIVER] Step 5: Closing notifications');
       closeNotifications();
+
+      console.log('[CALLER/RECEIVER] Step 6: Resetting keep-alive timer');
       resetKeepCallAliveTimer();
+
+      // Stop foreground service when call ends
+      console.log('[CALLER/RECEIVER] Step 7: Stopping foreground service');
+      try {
+        CallService?.stopForegroundService?.();
+        console.log('[CALLER/RECEIVER] ✅ Foreground service stopped');
+        await AsyncStorage.removeItem('ongoingCall');
+        console.log('[CALLER/RECEIVER] ✅ AsyncStorage cleared');
+      } catch (e) {
+        console.log('[CALLER/RECEIVER] ❌ Failed to stop foreground service:', e);
+      }
+
+      console.log('[CALLER/RECEIVER] ✅ Call termination complete on caller/receiver side');
       // goBackFromMainCallScreen(setShowFullScreenCall);
     } catch (err) {
       console.error(err);
@@ -299,6 +761,31 @@ function CallProvider({ children }: { children: React.ReactNode }) {
             startedAt: new Date(),
           };
         });
+        
+        // Persist call context to native when answering call
+        try {
+          CallService?.updateCallContext?.({
+            accessToken: userData?.accessToken,
+            socketUrl: socketURL,
+            userId: userData?.id,
+            callId: callId,
+            roomId: roomId,
+            clientCallId: currentCallDetails?.clientCallId,
+            initiatorId: data.initiatorId,
+            callType: callType,
+            state: 'ongoing',
+          });
+        } catch (e) {
+          console.log('Failed to update call context on answer:', e);
+        }
+        
+        // Ensure service is running when call becomes active
+        try {
+          const username = currentCallDetails?.recipients?.[0]?.name || '';
+          CallService?.startForegroundService?.('ongoing', username);
+        } catch (e) {
+          console.log('Failed to start foreground service on answer:', e);
+        }
         const device = await mediaDevice.initializeDevice(
           roomId,
           rtpCapabilites,
@@ -333,6 +820,25 @@ function CallProvider({ children }: { children: React.ReactNode }) {
           return [...prev, ...newPartcipants];
         });
 
+        // Update persisted call state after participants are created
+        try {
+          const callDetailsForPersistence = getCallDetails();
+          await AsyncStorage.setItem('ongoingCall', JSON.stringify({
+            state: 'ongoing',
+            roomId,
+            callId,
+            callType,
+            initiatorId: data.initiatorId,
+            initiatorDetails: callDetailsForPersistence?.initiatorDetails,
+            recipients: callDetailsForPersistence?.recipients || [],
+            recipentList: callDetailsForPersistence?.recipentList || [],
+            participants: newPartcipants,
+            timestamp: Date.now()
+          }));
+        } catch (e) {
+          console.log('Failed to save call state:', e);
+        }
+
         if (producers && producers.length > 0) {
           producers.forEach(async (producer: any) => {
             await mediaConsumers.consume(
@@ -362,6 +868,11 @@ function CallProvider({ children }: { children: React.ReactNode }) {
 
     resetCallDetails();
     goBackFromMainCallScreen(setShowFullScreenCall);
+    try {
+      CallService?.stopForegroundService?.();
+    } catch (e) {
+      console.log('Failed to stop foreground service on reject:', e);
+    }
   }
 
   async function onCallRejected(data: { userId: string }) {
@@ -390,6 +901,13 @@ function CallProvider({ children }: { children: React.ReactNode }) {
           ToastAndroid.SHORT,
         );
         await mediaProducers.stopProducing();
+        // Stop foreground service and clear persisted state on single-recipient rejection
+        try {
+          CallService?.stopForegroundService?.();
+          await AsyncStorage.removeItem('ongoingCall');
+        } catch (e) {
+          console.log('Failed to stop foreground service on rejection:', e);
+        }
         return;
       }
       ToastAndroid.show(
@@ -436,6 +954,51 @@ function CallProvider({ children }: { children: React.ReactNode }) {
           startedAt: new Date(),
         };
       });
+      
+      // Persist call context to native when call transitions to ongoing (caller side)
+      try {
+        CallService?.updateCallContext?.({
+          accessToken: userData?.accessToken,
+          socketUrl: socketURL,
+          userId: userData?.id,
+          callId: currentCallDetails?.callId,
+          roomId: currentCallDetails?.roomId,
+          clientCallId: currentCallDetails?.clientCallId,
+          initiatorId: currentCallDetails?.initiatorId,
+          callType: currentCallDetails?.type,
+          state: 'ongoing',
+        });
+      } catch (e) {
+        console.log('Failed to update call context on ongoing:', e);
+      }
+      
+      // Ensure caller's notification reflects ongoing state
+      try {
+          const username = currentCallDetails?.recipients?.[0]?.name || '';
+          CallService?.startForegroundService?.('ongoing', username);
+      } catch (e) {
+        console.log('Failed to update foreground notification on answer:', e);
+      }
+      
+      // Save call state when call is answered (caller side)
+      try {
+        const callDetailsForPersistence = getCallDetails();
+        await AsyncStorage.setItem('ongoingCall', JSON.stringify({
+          state: 'ongoing',
+          roomId: callDetailsForPersistence?.roomId,
+          callId: callDetailsForPersistence?.callId,
+          callType: callDetailsForPersistence?.type,
+          initiatorId: callDetailsForPersistence?.initiatorId,
+          initiatorDetails: callDetailsForPersistence?.initiatorDetails,
+          recipients: callDetailsForPersistence?.recipients || [],
+          recipentList: callDetailsForPersistence?.recipentList || [],
+          participants: callDetailsForPersistence?.participants || [],
+          timestamp: Date.now()
+        }));
+      } catch (e) {
+        console.log('Failed to save call state on answer:', e);
+      }
+      
       resetAutoEndTimer();
     } catch (err) {
       throw new Error(JSON.stringify(err));
@@ -449,26 +1012,60 @@ function CallProvider({ children }: { children: React.ReactNode }) {
   }) {
     const { message = '' } = data;
     const callDetails = callDetailsRef.current;
+    
+    // If call is already ended locally, just return silently
     if (!callDetails || callDetails.state == 'idle') {
-      throw new Error('tried to end the call without the currentCal');
+      console.log('[RECEIVER] Call already ended locally, ignoring termination event');
+      return;
     }
     if (callDetails.roomId !== data.roomId) {
+      console.log('[RECEIVER] Room ID mismatch, ignoring termination event:', {
+        receivedRoomId: data.roomId,
+        currentRoomId: callDetails.roomId,
+      });
       // ToastAndroid.show(`call with roomId ${data.roomId} terminated`, ToastAndroid.SHORT);
       return;
     }
+    
+    console.log('[RECEIVER] ✅ Call termination event matches current call, proceeding with cleanup');
     // toast(`Call Terminated by ${data.callId}`);
     if (message) {
+      console.log('[RECEIVER] Displaying termination message:', message);
       ToastAndroid.show(message, ToastAndroid.SHORT);
     }
 
+    console.log('[RECEIVER] Starting cleanup after receiving termination event...');
+    
+    console.log('[RECEIVER] Step 1: Resetting call details');
     resetCallDetails();
+    
+    console.log('[RECEIVER] Step 2: Stopping media producers');
     mediaProducers.stopProducing();
 
+    console.log('[RECEIVER] Step 3: Removing media device');
     removeDevice();
 
+    console.log('[RECEIVER] Step 4: Hiding call notifications');
     hideCallNotification('showReconnectCallPopup');
+    
+    console.log('[RECEIVER] Step 5: Resetting keep-alive timer');
     resetKeepCallAliveTimer();
+    
+    console.log('[RECEIVER] Step 6: Going back from main call screen');
     goBackFromMainCallScreen(setShowFullScreenCall);
+    
+    // Stop service and clear persisted state on remote termination
+    console.log('[RECEIVER] Step 7: Stopping foreground service');
+    try {
+      CallService?.stopForegroundService?.();
+      console.log('[RECEIVER] ✅ Foreground service stopped');
+      await AsyncStorage.removeItem('ongoingCall');
+      console.log('[RECEIVER] ✅ AsyncStorage cleared');
+    } catch (e) {
+      console.log('[RECEIVER] ❌ Failed to stop foreground service on remote terminate:', e);
+    }
+    
+    console.log('[RECEIVER] ✅ Call termination complete on receiver side');
   }
   async function handleUserLeftCall(data: {
     callId: string;
@@ -528,6 +1125,11 @@ function CallProvider({ children }: { children: React.ReactNode }) {
     });
     resetCallDetails();
     goBackFromMainCallScreen(setShowFullScreenCall);
+    try {
+      CallService?.stopForegroundService?.();
+    } catch (e) {
+      console.log('Failed to stop foreground service on ignore:', e);
+    }
   }
 
   function onIncomingCall(data: incomingCallData) {
@@ -565,7 +1167,45 @@ function CallProvider({ children }: { children: React.ReactNode }) {
       return updateObj;
     });
 
+    // Persist call context to native when incoming call arrives
+    try {
+      CallService?.updateCallContext?.({
+        accessToken: userData?.accessToken,
+        socketUrl: socketURL,
+        userId: userData?.id,
+        callId: data.callId,
+        roomId: data.roomId,
+        clientCallId: currentCallDetails?.clientCallId,
+        initiatorId: data.initiatorId,
+        callType: data.callType,
+        state: 'incoming',
+      });
+    } catch (e) {
+      console.log('Failed to update call context on incoming:', e);
+    }
+
     startIncomingCallTimer(ignoreCall);
+    
+    // Show incoming call notification before user answers
+    try {
+      const username = data?.initiatorDetails?.name || '';
+      CallService?.startForegroundService?.('incoming', username);
+      
+      // Save incoming call state to persist across app restarts (non-blocking)
+      AsyncStorage.setItem('ongoingCall', JSON.stringify({
+        state: 'incoming',
+        callId: data.callId,
+        roomId: data.roomId,
+        callType: data.callType,
+        initiatorId: data.initiatorId,
+        initiatorDetails: data.initiatorDetails,
+        recipients: data.recipents || [],
+        recipentList: data.recipentList || [],
+        timestamp: Date.now()
+      })).catch(e => console.log('Failed to save incoming call state:', e));
+    } catch (e) {
+      console.log('Failed to start incoming call foreground notification:', e);
+    }
   }
 
   //🔊 Media/AV Controls:
@@ -713,20 +1353,27 @@ export async function getCallPermissions(props: {
   callType: 'audio' | 'video';
 }) {
   try {
-    const micPermission = await requestMicrophonePermission();
-    if (micPermission !== 'granted') {
-      ToastAndroid.show('Microphone permission denied', ToastAndroid.SHORT);
-      return false;
-    }
-    if (props.callType === 'video') {
-      let resp = await requestCameraPermission();
-      if (resp !== 'granted') {
-        ToastAndroid.show('Camera permission denied', ToastAndroid.SHORT);
+    // Check if microphone permission is already granted (don't request again)
+    if (Platform.OS === 'android') {
+      const micPermission = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
+      if (!micPermission) {
+        ToastAndroid.show('Microphone permission is required for calls', ToastAndroid.SHORT);
         return false;
+      }
+    }
+    
+    if (props.callType === 'video') {
+      if (Platform.OS === 'android') {
+        const cameraPermission = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.CAMERA);
+        if (!cameraPermission) {
+          ToastAndroid.show('Camera permission is required for video calls', ToastAndroid.SHORT);
+          return false;
+        }
       }
     }
     return true;
   } catch (err) {
+    console.error('Error checking permissions:', err);
     return false;
   }
 }

@@ -230,6 +230,7 @@ const RenderImages = () => {
   }
   // For group calls, show up to 3 participants and a "+X Others" indicator if needed
   const visibleParticipants = callDetails.recipentList.slice(0, 4);
+  const placeholder = require('./profile_image.png');
 
   return (
     <View style={newStyles.centerContent}>
@@ -249,7 +250,11 @@ const RenderImages = () => {
                   style={[{ left: index * 40, position: 'absolute' }]}
                 >
                   <Image
-                    source={{ uri: profile.image }}
+                    source={
+                      profile?.image && profile.image.trim().length > 0
+                        ? { uri: profile.image }
+                        : placeholder
+                    }
                     style={{
                       width: 80,
                       height: 80,

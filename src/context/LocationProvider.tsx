@@ -7,11 +7,10 @@ import React, {
 } from 'react';
 import useSocket from '../socket-client/useSocket';
 import { ToastAndroid } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { locationForegroundService as foregroundService } from '../services/foreground/ForegroundService';
+import { useMe } from '../hooks/util/useMe';
 
-type Location = {
-  latitude: number;
-  longitude: number;
-};
 
 type LocationContextType = {
   remoteLocation: locationPayload | null;
@@ -35,6 +34,9 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
   const { socket } = useSocket();
+  const { user } = useMe();
+
+  
 
   const [remoteLocation, setRemoteLocation] = useState<locationPayload | null>(
     null,
@@ -45,6 +47,70 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({
     username: string;
   } | null>(null);
 
+  // Load sharing state from AsyncStorage on mount
+  useEffect(() => {
+    loadSharingState();
+  }, []);
+
+  // Listen for native events when service is stopped via notification
+  useEffect(() => {
+    const eventEmitter = foregroundService.getEventEmitter();
+    if (!eventEmitter) return;
+
+    const subscription = eventEmitter.addListener('LocationSharingServiceStopped', () => {
+      // Update state when service is stopped via notification
+      setIsSharing(false);
+      setRecipentInfo(null);
+      saveSharingState(false);
+      ToastAndroid.show('Location sharing stopped', ToastAndroid.SHORT);
+    });
+
+    return () => subscription.remove();
+  }, []);
+
+  const loadSharingState = async () => {
+    try {
+      // Check if the native service is actually running
+      const isServiceRunning = await foregroundService.isRunning();
+      
+      if (!isServiceRunning) {
+        // Service is not running, clear any saved state
+        setIsSharing(false);
+        setRecipentInfo(null);
+        await saveSharingState(false);
+        return;
+      }
+
+      // Service is running, load the saved state
+      const savedState = await AsyncStorage.getItem('locationSharingState');
+      if (savedState) {
+        const { isSharing: savedIsSharing, recieverId: savedRecieverId, username: savedUsername } = JSON.parse(savedState);
+        if (savedIsSharing) {
+          setIsSharing(true);
+          setRecipentInfo({ recieverId: savedRecieverId, username: savedUsername });
+        }
+      }
+    } catch (e) {
+      // Silent fail for storage errors
+    }
+  };
+
+  const saveSharingState = async (isSharing: boolean, recieverId?: string, username?: string) => {
+    try {
+      if (isSharing && recieverId && username) {
+        await AsyncStorage.setItem('locationSharingState', JSON.stringify({
+          isSharing: true,
+          recieverId,
+          username
+        }));
+      } else {
+        await AsyncStorage.removeItem('locationSharingState');
+      }
+    } catch (e) {
+      // Silent fail for storage errors
+    }
+  };
+
   // ✅ ref to always hold latest recipient info
   const recipentRef = useRef<{ recieverId: string; username: string } | null>(
     null,
@@ -53,24 +119,11 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({
     recipentRef.current = recipentInfo;
   }, [recipentInfo]);
 
-  const onLocationUpdate = (location: Location) => {
-    if (!socket || socket.connected === false) return;
+  // Location sharing is now handled by native service
 
-    if (!recipentRef.current) return;
-    socket.emit('shareLocation', {
-      recieverId: recipentRef.current?.recieverId,
-      latitude: location.latitude,
-      longitude: location.longitude,
-      username: recipentRef.current?.username,
-    } as locationPayload);
-    console.log('Location shared');
-  };
+  // Mock location is now handled by native service
 
-  const { location, startMockLocation, stopMockLocation } = useMockLocation({
-    freq: 2000,
-  });
-
-  const startLocationSharing = (recieverId: string, username: string) => {
+  const startLocationSharing = async (recieverId: string, username: string) => {
     if (isSharing) return;
 
     if (!socket || socket.connected === false) {
@@ -78,29 +131,100 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({
       return;
     }
 
+    // Stop any existing location sharing service first
+    try {
+      foregroundService.stop();
+    } catch (e) {
+      // Service might not be running
+    }
+
+    // Set sharing state BEFORE starting new service
     setIsSharing(true);
     setRecipentInfo({ recieverId, username });
-    startMockLocation(onLocationUpdate);
+    
+    // Save state to AsyncStorage
+    await saveSharingState(true, recieverId, username);
+    
+    // Get session data for native service
+    try {
+      if (!user?.accessToken) {
+        ToastAndroid.show('User not authenticated', ToastAndroid.SHORT);
+        return;
+      }
+      
+      const authToken = user.accessToken;
+      const socketUrl = 'https://test-server.chatbucket.chat/'; // From socket.ts
+      
+      // Start native foreground service with session data
+      foregroundService.start('Location sharing active', 'Tap to return to app', {
+        socketUrl,
+        authToken,
+        userId: user.id,
+        recieverId,
+        username,
+        intervalMs: 2000
+      });
+      
+    } catch (e) {
+      ToastAndroid.show('Failed to start location sharing', ToastAndroid.SHORT);
+      // Reset state if service start failed
+      setIsSharing(false);
+      setRecipentInfo(null);
+    }
   };
 
-  const stopLocationSharing = () => {
+  const stopLocationSharing = async () => {
     setIsSharing(false);
     setRecipentInfo(null);
-    stopMockLocation();
+    
+    // Clear state from AsyncStorage
+    await saveSharingState(false);
+    
+    // Stop native foreground service
+    try {
+      foregroundService.stop();
+    } catch (e) {
+      // Service might not be running
+    }
   };
 
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  // Track previous user ID to detect actual user changes
+  const prevUserIdRef = useRef<string | null>(null);
+
+  // Handle user changes only
+  useEffect(() => {
+    const handleUserChange = async () => {
+      // Only clear sharing state if user actually changed (not initial load)
+      if (user?.id && prevUserIdRef.current && prevUserIdRef.current !== user.id) {
+        setIsSharing(false);
+        setRecipentInfo(null);
+        await saveSharingState(false);
+        try {
+          foregroundService.stop();
+        } catch (e) {
+          // Service might not be running
+        }
+      }
+      
+      // Update previous user ID
+      prevUserIdRef.current = user?.id || null;
+    };
+
+    // Run on user change
+    handleUserChange();
+  }, [user?.id]); // Re-run when user changes
+
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  
   useEffect(() => {
     if (socket.connected) {
       socket.on('onLocationUpdate', (data: locationPayload) => {
-        console.log('recieved location:', data);
         setRemoteLocation({
           latitude: data.latitude,
           longitude: data.longitude,
           recieverId: data.recieverId,
           username: data.username,
         });
-        console.log('remote location:', remoteLocation);
         if (timerRef.current) {
           clearTimeout(timerRef.current);
         }
@@ -108,10 +232,12 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({
         // if not contiu
         timerRef.current = setTimeout(() => {
           setRemoteLocation(null);
-          clearTimeout(timerRef.current);
+          if (timerRef.current) {
+            clearTimeout(timerRef.current);
+            timerRef.current = null;
+          }
           ToastAndroid.show('Location ended', ToastAndroid.SHORT);
         }, 5000);
-        console.debug('remote location: timer has been set', remoteLocation);
       });
     }
     return () => {
@@ -145,46 +271,3 @@ export const useLocation = () => {
   return ctx;
 };
 
-type options = {
-  freq: number;
-};
-
-function useMockLocation(options: options) {
-  const { freq } = options;
-  const [location, setLocation] = useState<Location | null>(null);
-
-  const intervalRef = useRef<NodeJS.Timer | null>(null);
-
-  const startMockLocation = (
-    onLocationUpdate: (location: Location) => void,
-  ) => {
-    if (intervalRef.current) return;
-    intervalRef.current = setInterval(() => {
-      const lat = Math.random() * 180 - 90;
-      const lon = Math.random() * 360 - 180;
-      setLocation({ latitude: lat, longitude: lon });
-      if (onLocationUpdate) {
-        onLocationUpdate({ latitude: lat, longitude: lon });
-      }
-    }, freq);
-  };
-
-  const stopMockLocation = () => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-  };
-
-  useEffect(() => {
-    return () => {
-      stopMockLocation();
-    };
-  }, []);
-
-  return {
-    startMockLocation,
-    location,
-    stopMockLocation,
-  };
-}
