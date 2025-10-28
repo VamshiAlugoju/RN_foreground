@@ -49,7 +49,6 @@ class CallForegroundService : Service() {
 
   override fun onCreate() {
     super.onCreate()
-    Log.d("CallForegroundService", "onCreate called")
     
     // Load saved call context from SharedPreferences
     loadCallContext()
@@ -58,7 +57,6 @@ class CallForegroundService : Service() {
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    Log.d("CallForegroundService", "onStartCommand")
     
     // React Native side should request FOREGROUND_SERVICE_PHONE_CALL permission before starting this service (Android 14+)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -83,16 +81,13 @@ class CallForegroundService : Service() {
       
       if (isRnAlive) {
         // RN is alive - use standard event emission
-        Log.d("CallService", "React Native is alive, using RN bridge for action: $action")
         when (action) {
           ACTION_END_CALL -> {
-            Log.d("CallService", "Call ended")
             CallServiceModule.getInstance()?.emitCallEndedEvent()
             stopSelf()
             return START_NOT_STICKY
           }
           ACTION_ACCEPT_CALL -> {
-            Log.d("CallService", "Call accepted")
             CallServiceModule.getInstance()?.emitCallAcceptedEvent()
             
             // Bring app to foreground if it's in background
@@ -104,33 +99,33 @@ class CallForegroundService : Service() {
                   addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 }
                 launchIntent?.let { startActivity(it) }
-                Log.d("CallService", "Launched RN activity (was in background)")
               }
             } catch (e: Exception) {
               Log.e("CallService", "Failed to bring activity to foreground: ${e.message}", e)
             }
           }
           ACTION_REJECT_CALL -> {
-            Log.d("CallService", "Call rejected")
             CallServiceModule.getInstance()?.emitCallRejectedEvent()
             stopSelf()
             return START_NOT_STICKY
           }
         }
         
-        // Reassert the foreground with the latest known state
-        try {
-          val ongoing = buildNotification(currentTitle, currentMessage, currentType)
-          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-              NOTIFICATION_ID,
-              ongoing,
-              ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
-            )
-          } else {
-            startForeground(NOTIFICATION_ID, ongoing)
-          }
-        } catch (_: Throwable) {}
+                 // Reassert the foreground with the latest known state
+         try {
+           val ongoing = buildNotification(currentTitle, currentMessage, currentType)
+           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+             startForeground(
+               NOTIFICATION_ID,
+               ongoing,
+               ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+             )
+           } else {
+             startForeground(NOTIFICATION_ID, ongoing)
+           }
+         } catch (e: Throwable) {
+           Log.e("CallForegroundService", "Error reasserting foreground", e)
+         }
         
         ensureWakeLock()
         ensureWifiLock()
@@ -138,7 +133,6 @@ class CallForegroundService : Service() {
       } else {
         // RN is dead - use native socket fallback
         Log.w("CallService", "React Native is DEAD, using native socket fallback for action: $action")
-        Log.d("CallService", "Context available: socketUrl=$socketUrl, userId=$userId, callId=$callId, roomId=$roomId")
         
         when (action) {
           ACTION_END_CALL -> {
@@ -190,71 +184,92 @@ class CallForegroundService : Service() {
     val callTypeExtra = intent?.getStringExtra(EXTRA_CALL_TYPE)
     val usernameExtra = intent?.getStringExtra(EXTRA_USERNAME)
     
-    // Determine call type
-    val finalType = when {
-      !typeExtra.isNullOrBlank() -> when (typeExtra.lowercase()) {
-        CALL_TYPE_OUTGOING -> CALL_TYPE_OUTGOING
-        CALL_TYPE_INCOMING -> CALL_TYPE_INCOMING
-        else -> CALL_TYPE_ONGOING
-      }
-      !callTypeExtra.isNullOrBlank() -> when (callTypeExtra.lowercase()) {
-        CALL_TYPE_OUTGOING -> CALL_TYPE_OUTGOING
-        CALL_TYPE_INCOMING -> CALL_TYPE_INCOMING
-        else -> CALL_TYPE_ONGOING
-      }
-      else -> CALL_TYPE_ONGOING
-    }
+    // Check if we have any extras in the intent
+    // If not, this is likely a service restart or app re-entry - don't update notification
+    val hasExtras = !titleExtra.isNullOrBlank() || !messageExtra.isNullOrBlank() || 
+                    !typeExtra.isNullOrBlank() || !callTypeExtra.isNullOrBlank() || 
+                    !usernameExtra.isNullOrBlank()
     
-    // Determine title and message
-    val finalTitle: String
-    val finalMessage: String
-    
-    if (!titleExtra.isNullOrBlank() && !messageExtra.isNullOrBlank()) {
-      // New parameter style
-      finalTitle = titleExtra
-      finalMessage = messageExtra
-    } else {
-      // Legacy parameter style - build title/message from username and callType
-      val safeUsername = usernameExtra?.ifBlank { "" } ?: ""
-      val (generatedTitle, generatedMessage) = when (finalType) {
-        CALL_TYPE_OUTGOING -> {
-          val t = if (safeUsername.isBlank()) "Calling…" else "Calling ${safeUsername}…"
-          t to "Waiting for answer"
-        }
-        CALL_TYPE_INCOMING -> {
-          val t = if (safeUsername.isBlank()) "Incoming call" else "Incoming call from ${safeUsername}"
-          t to "Tap to answer or reject"
-        }
-        else -> {
-          val t = if (safeUsername.isBlank()) "Ongoing call" else "Ongoing call with ${safeUsername}"
-          t to DEFAULT_MESSAGE
-        }
-      }
-      finalTitle = generatedTitle
-      finalMessage = generatedMessage
-    }
+     if (hasExtras) {
+       // We have extras - extract the new values
+       // Determine call type
+       val newType = when {
+         !typeExtra.isNullOrBlank() -> when (typeExtra.lowercase()) {
+           CALL_TYPE_OUTGOING -> CALL_TYPE_OUTGOING
+           CALL_TYPE_INCOMING -> CALL_TYPE_INCOMING
+           else -> CALL_TYPE_ONGOING
+         }
+         !callTypeExtra.isNullOrBlank() -> when (callTypeExtra.lowercase()) {
+           CALL_TYPE_OUTGOING -> CALL_TYPE_OUTGOING
+           CALL_TYPE_INCOMING -> CALL_TYPE_INCOMING
+           else -> CALL_TYPE_ONGOING
+         }
+         else -> CALL_TYPE_ONGOING
+       }
+       
+       // Determine title and message
+       val newTitle: String
+       val newMessage: String
+       
+       if (!titleExtra.isNullOrBlank() && !messageExtra.isNullOrBlank()) {
+         // New parameter style
+         newTitle = titleExtra
+         newMessage = messageExtra
+       } else {
+         // Legacy parameter style - build title/message from username and callType
+         val safeUsername = usernameExtra?.ifBlank { "" } ?: ""
+         val (generatedTitle, generatedMessage) = when (newType) {
+           CALL_TYPE_OUTGOING -> {
+             val t = if (safeUsername.isBlank()) "Calling…" else "Calling ${safeUsername}…"
+             t to "Waiting for answer"
+           }
+           CALL_TYPE_INCOMING -> {
+             val t = if (safeUsername.isBlank()) "Incoming call" else "Incoming call from ${safeUsername}"
+             t to "Tap to answer or reject"
+           }
+           else -> {
+             val t = if (safeUsername.isBlank()) "Ongoing call" else "Ongoing call with ${safeUsername}"
+             t to DEFAULT_MESSAGE
+           }
+         }
+         newTitle = generatedTitle
+         newMessage = generatedMessage
+       }
 
-    currentTitle = finalTitle
-    currentMessage = finalMessage
-    currentType = finalType
-
-    val notification = buildNotification(currentTitle, currentMessage, currentType)
-    
-    // Always (re)assert foreground to satisfy timing constraints
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-      startForeground(
-        NOTIFICATION_ID,
-        notification,
-        ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
-      )
-    } else {
-      startForeground(NOTIFICATION_ID, notification)
-    }
-    
-    ensureWakeLock()
-    ensureWifiLock()
-    
-    return START_STICKY
+       // Check if the new data is different from current state
+       val stateChanged = newTitle != currentTitle || newMessage != currentMessage || newType != currentType
+       
+       // Update state
+       currentTitle = newTitle
+       currentMessage = newMessage
+       currentType = newType
+       
+       if (stateChanged) {
+         val notification = buildNotification(currentTitle, currentMessage, currentType)
+         
+         // Always (re)assert foreground to satisfy timing constraints
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+           startForeground(
+             NOTIFICATION_ID,
+             notification,
+             ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+           )
+         } else {
+           startForeground(NOTIFICATION_ID, notification)
+         }
+       } else {
+         // state unchanged; no need to restart foreground
+       }
+          } else {
+       // No extras - service was restarted or app was resumed
+       // DO NOT call startForeground here - it will reset the CallStyle notification timer
+       // The notification is already persistent, we just need to ensure locks are active
+      }
+     
+     ensureWakeLock()
+     ensureWifiLock()
+     
+     return START_STICKY
   }
 
   override fun onTaskRemoved(rootIntent: Intent?) {
@@ -265,7 +280,6 @@ class CallForegroundService : Service() {
 
   override fun onDestroy() {
     super.onDestroy()
-    Log.d("CallForegroundService", "onDestroy called")
     try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
     try { wifiLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
   }
@@ -470,8 +484,6 @@ class CallForegroundService : Service() {
   private fun loadCallContext() {
     try {
       val prefs = getSharedPreferences("call_context", Context.MODE_PRIVATE)
-      val allKeys = prefs.all
-      Log.d("NativeSocket", "Loading call context, available keys: ${allKeys.keys}")
       
       socketUrl = prefs.getString("socketUrl", null)
       accessToken = prefs.getString("accessToken", null)
@@ -485,8 +497,6 @@ class CallForegroundService : Service() {
       
       if (socketUrl == null || accessToken == null) {
         Log.w("NativeSocket", "⚠️ Critical context missing! socketUrl=$socketUrl, accessToken=$accessToken")
-      } else {
-        Log.d("NativeSocket", "✅ Context loaded: socketUrl=$socketUrl | userId=$userId | callId=$callId | roomId=$roomId")
       }
     } catch (e: Exception) {
       Log.e("NativeSocket", "Failed to load call context: ${e.message}", e)
@@ -510,8 +520,6 @@ class CallForegroundService : Service() {
     val filteredPayload = payload.filterValues { it != null }
     val jsonPayload = JSONObject(filteredPayload)
     
-    Log.d("NativeSocket", "Creating temporary socket connection for event: $event")
-    
     try {
       // Create a temporary socket for this single event
       val opts = IO.Options().apply {
@@ -523,14 +531,12 @@ class CallForegroundService : Service() {
       val tempSocket = IO.socket(socketUrl ?: return, opts)
       
       tempSocket.once(Socket.EVENT_CONNECT) {
-        Log.d("NativeSocket", "✅ Temporary socket connected, emitting $event: $jsonPayload")
         tempSocket.emit(event, jsonPayload)
         
         // Close immediately after emitting
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
           tempSocket.disconnect()
           tempSocket.close()
-          Log.d("NativeSocket", "✅ Temporary socket closed after emitting $event")
           
           // Clear persisted call state to prevent ghost calls when app reopens
           clearPersistedCallState()
@@ -567,7 +573,6 @@ class CallForegroundService : Service() {
    */
   private fun clearPersistedCallState() {
     try {
-      Log.d("NativeSocket", "Clearing persisted call state for callId: $callId")
       
       // IMPORTANT: Set flag BEFORE clearing context (while we still have callId)
       if (callId != null) {
@@ -576,7 +581,6 @@ class CallForegroundService : Service() {
           .putLong("lastNativeEndCallTimestamp", System.currentTimeMillis())
           .putString("lastEndedCallId", callId)
           .apply()
-        Log.d("NativeSocket", "✅ Set nativeEndedCall flag for callId: $callId")
       } else {
         Log.w("NativeSocket", "⚠️ Cannot set nativeEndedCall flag: callId is null")
       }
@@ -584,7 +588,6 @@ class CallForegroundService : Service() {
       // Now clear call_context SharedPreferences (our native storage)
       val callContextPrefs = getSharedPreferences("call_context", Context.MODE_PRIVATE)
       callContextPrefs.edit().clear().apply()
-      Log.d("NativeSocket", "✅ Cleared call_context SharedPreferences")
       
     } catch (e: Exception) {
       Log.e("NativeSocket", "❌ Error clearing persisted call state: ${e.message}", e)
