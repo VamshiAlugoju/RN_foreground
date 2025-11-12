@@ -23,6 +23,12 @@ import java.net.URI
 import java.util.Timer
 import java.util.TimerTask
 
+
+
+import android.location.Location
+import android.location.LocationManager
+import android.content.pm.PackageManager
+
 class LocationSharingService : Service() {
   private var wakeLock: PowerManager.WakeLock? = null
   private var wifiLock: WifiManager.WifiLock? = null
@@ -409,33 +415,61 @@ class LocationSharingService : Service() {
 
   private fun generateAndSendLocation() {
     try {
-      if (socket?.connected() == true) {
-        // Generate mock coordinates (same logic as React Native)
-        val latitude = (Math.random() * 180 - 90).toDouble()
-        val longitude = (Math.random() * 360 - 180).toDouble()
-        
-        // Remember last values for notification deep link
+        if (socket?.connected() != true) {
+            Log.w("LocationSharingService", "Socket not connected, skipping location emit")
+            return
+        }
+
+        val locationManager = getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+
+        // Check permissions first
+        val hasFine = checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        val hasCoarse = checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!hasFine && !hasCoarse) {
+            Log.e("LocationSharingService", "Location permission not granted")
+            return
+        }
+
+        // Try to get last known location from GPS, fallback to Network
+        val gpsLocation = locationManager.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER)
+        val netLocation = locationManager.getLastKnownLocation(android.location.LocationManager.NETWORK_PROVIDER)
+
+        val bestLocation = when {
+            gpsLocation != null && netLocation != null ->
+                if (gpsLocation.time > netLocation.time) gpsLocation else netLocation
+            gpsLocation != null -> gpsLocation
+            netLocation != null -> netLocation
+            else -> null
+        }
+
+        if (bestLocation == null) {
+            Log.w("LocationSharingService", "No valid location available yet")
+            return
+        }
+
+        val latitude = bestLocation.latitude
+        val longitude = bestLocation.longitude
+
+        // Remember for deep link
         lastLat = latitude
         lastLon = longitude
 
-        // Update notification with new coordinates
+        // Update foreground notification
         val notification = buildNotification(currentTitle, currentMessage)
         startForeground(NOTIFICATION_ID, notification)
 
-        val locationData = JSONObject().apply {
-          put("recieverId", recieverId)
-          put("latitude", latitude)
-          put("longitude", longitude)
-          put("username", username)
+        // Prepare and emit data
+        val locationData = org.json.JSONObject().apply {
+            put("recieverId", recieverId)
+            put("latitude", latitude)
+            put("longitude", longitude)
+            put("username", username)
         }
-        
+
         socket?.emit("shareLocation", locationData)
-        Log.d("LocationSharingService", "Location sent: lat=$latitude, lon=$longitude")
-      } else {
-        Log.w("LocationSharingService", "Socket not connected, cannot send location")
-      }
+        Log.d("LocationSharingService", "📍 Sent: lat=$latitude, lon=$longitude")
     } catch (e: Exception) {
-      Log.e("LocationSharingService", "Error sending location: ${e.message}", e)
+        Log.e("LocationSharingService", "Error sending real location: ${e.message}", e)
     }
   }
 
